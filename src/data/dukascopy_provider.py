@@ -18,9 +18,9 @@ INSTRUMENT_MAP = {
 }
 
 INTERVAL_MAP = {
-    "M1":  dukascopy_python.INTERVAL_MINUTE_1,
-    "M5":  dukascopy_python.INTERVAL_MINUTE_5,
-    "M15": dukascopy_python.INTERVAL_MINUTE_15,
+    "M1":  dukascopy_python.INTERVAL_MIN_1,
+    "M5":  dukascopy_python.INTERVAL_MIN_5,
+    "M15": dukascopy_python.INTERVAL_MIN_15,
     "H1":  dukascopy_python.INTERVAL_HOUR_1,
     "D1":  dukascopy_python.INTERVAL_DAY_1,
 }
