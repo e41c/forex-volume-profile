@@ -10,6 +10,7 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 os.makedirs("data/processed", exist_ok=True)
 
+
 def get_provider():
     system = platform.system()
 
@@ -42,12 +43,19 @@ def run():
             cache_path = cache
         )
     else:
-        df = provider.get_ohlcv(Config.SYMBOL, Config.TIMEFRAME_PROFILE,
-                                bars=Config.BARS)
+        df = provider.get_ohlcv(
+            Config.SYMBOL,
+            Config.TIMEFRAME_PROFILE,
+            bars=Config.BARS
+        )
 
     # --- Build Volume Profile ---
     levels = build_volume_profile(df)
     log.info(f"POC: {levels.poc:.5f}")
+
+    # --- Visualize ---
+    from src.visualizer import plot_volume_profile
+    plot_volume_profile(df, levels, symbol=Config.SYMBOL)
 
     # --- Generate Signal ---
     signal = generate_signal(df, levels)
