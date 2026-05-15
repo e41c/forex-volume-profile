@@ -1,0 +1,80 @@
+# src/main.py
+import platform
+import os
+from datetime import datetime
+from src.config import Config
+from src.indicators.volume_profile import build_volume_profile
+from src.strategy.vp_strategy import generate_signal, calculate_position_size
+from src.utils.logger import get_logger
+
+log = get_logger(__name__)
+os.makedirs("data/processed", exist_ok=True)
+
+def get_provider():
+    system = platform.system()
+
+    if system == "Darwin":  # Mac
+        from src.data.dukascopy_provider import DukascopyProvider
+        log.info("Mac detected — using Dukascopy provider")
+        return DukascopyProvider()
+
+    elif system == "Windows":
+        from src.data.mt5_provider import MT5DataProvider
+        log.info("Windows detected — using MT5 provider")
+        return MT5DataProvider()
+
+    else:
+        raise RuntimeError(f"Unsupported OS: {system}")
+
+
+def run():
+    log.info("=== Goblin Bot Starting ===")
+    provider = get_provider()
+
+    # --- Fetch Data ---
+    if platform.system() == "Darwin":
+        cache = f"data/processed/{Config.SYMBOL}_{Config.TIMEFRAME_PROFILE}.parquet"
+        df = provider.fetch_and_cache(
+            symbol     = Config.SYMBOL,
+            timeframe  = Config.TIMEFRAME_PROFILE,
+            start      = datetime(2024, 1, 1),
+            end        = datetime(2024, 12, 31),
+            cache_path = cache
+        )
+    else:
+        df = provider.get_ohlcv(Config.SYMBOL, Config.TIMEFRAME_PROFILE,
+                                bars=Config.BARS)
+
+    # --- Build Volume Profile ---
+    levels = build_volume_profile(df)
+    log.info(f"POC: {levels.poc:.5f}")
+
+    # --- Generate Signal ---
+    signal = generate_signal(df, levels)
+
+    if signal:
+        lots = calculate_position_size(
+            account_balance = Config.ACCOUNT_BALANCE,
+            risk_percent    = Config.RISK_PERCENT,
+            stop_loss_pips  = abs(signal.entry - signal.stop_loss) / 0.0001
+        )
+
+        log.info(f"""
+        =====================================
+        SIGNAL: {signal.direction}
+        Reason:      {signal.reason}
+        Entry:       {signal.entry}
+        Stop Loss:   {signal.stop_loss}
+        Take Profit: {signal.take_profit}
+        R:R Ratio:   {signal.rr_ratio}
+        Lot Size:    {lots}
+        =====================================
+        """)
+    else:
+        log.info("No signal this bar — goblin waits patiently 🐲")
+
+    log.info("=== Goblin Bot Done ===")
+
+
+if __name__ == "__main__":
+    run()

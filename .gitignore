@@ -216,3 +216,17 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# append our project-specific rules
+cat >> .gitignore << 'EOF'
+
+# project specific
+.env
+venv/
+logs/
+data/raw/
+data/processed/
+__pycache__/
+*.pyc
+.DS_Store
+*.parquet
