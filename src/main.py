@@ -1,7 +1,7 @@
 # src/main.py
 import platform
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from src.config import Config
 from src.indicators.volume_profile import build_volume_profile
 from src.strategy.vp_strategy import generate_signal, calculate_position_size
@@ -9,19 +9,20 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 os.makedirs("data/processed", exist_ok=True)
+os.makedirs("logs",           exist_ok=True)
 
 
 def get_provider():
     system = platform.system()
 
-    if system == "Darwin":  # Mac
-        from src.data.dukascopy_provider import DukascopyProvider
-        log.info("Mac detected — using Dukascopy provider")
-        return DukascopyProvider()
+    if system == "Darwin":
+        from src.data.csv_provider import CSVProvider
+        log.info("Mac — using CSV/DuckDB provider")
+        return CSVProvider()
 
     elif system == "Windows":
         from src.data.mt5_provider import MT5DataProvider
-        log.info("Windows detected — using MT5 provider")
+        log.info("Windows — using MT5 provider")
         return MT5DataProvider()
 
     else:
@@ -29,29 +30,23 @@ def get_provider():
 
 
 def run():
-    log.info("=== Goblin Bot Starting ===")
+    log.info("=== Goblin Bot Starting 🐲 ===")
     provider = get_provider()
 
     # --- Fetch Data ---
-    if platform.system() == "Darwin":
-        cache = f"data/processed/{Config.SYMBOL}_{Config.TIMEFRAME_PROFILE}.parquet"
-        df = provider.fetch_and_cache(
-            symbol     = Config.SYMBOL,
-            timeframe  = Config.TIMEFRAME_PROFILE,
-            start      = datetime(2024, 1, 1),
-            end        = datetime(2024, 12, 31),
-            cache_path = cache
-        )
-    else:
-        df = provider.get_ohlcv(
-            Config.SYMBOL,
-            Config.TIMEFRAME_PROFILE,
-            bars=Config.BARS
-        )
+    # no date range = loads everything available in the DB automatically
+    df = provider.get_ohlcv(
+        symbol    = Config.SYMBOL,
+        timeframe = Config.TIMEFRAME_PROFILE,
+    )
 
     # --- Build Volume Profile ---
     levels = build_volume_profile(df)
-    log.info(f"POC: {levels.poc:.5f}")
+    log.info(
+        f"POC: {levels.poc:.5f}  |  "
+        f"HVNs: {len(levels.hvns)}  |  "
+        f"LVNs: {len(levels.lvns)}"
+    )
 
     # --- Visualize ---
     from src.visualizer import plot_volume_profile
@@ -66,10 +61,9 @@ def run():
             risk_percent    = Config.RISK_PERCENT,
             stop_loss_pips  = abs(signal.entry - signal.stop_loss) / 0.0001
         )
-
         log.info(f"""
         =====================================
-        SIGNAL: {signal.direction}
+        SIGNAL:      {signal.direction}
         Reason:      {signal.reason}
         Entry:       {signal.entry}
         Stop Loss:   {signal.stop_loss}
