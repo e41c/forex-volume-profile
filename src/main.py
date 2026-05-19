@@ -4,6 +4,7 @@ import os
 from datetime import datetime, timezone
 from src.config import Config
 from src.indicators.volume_profile import build_volume_profile
+from src.indicators.session_profile import build_multi_session_levels
 from src.strategy.vp_strategy import generate_signal, calculate_position_size
 from src.utils.logger import get_logger
 
@@ -34,26 +35,34 @@ def run():
     provider = get_provider()
 
     # --- Fetch Data ---
-    # no date range = loads everything available in the DB automatically
     df = provider.get_ohlcv(
         symbol    = Config.SYMBOL,
         timeframe = Config.TIMEFRAME_PROFILE,
     )
 
-    # --- Build Volume Profile ---
-    levels = build_volume_profile(df)
+    # --- Build Long-Term Volume Profile (23 years) ---
+    long_term_levels = build_volume_profile(df)
     log.info(
-        f"POC: {levels.poc:.5f}  |  "
-        f"HVNs: {len(levels.hvns)}  |  "
-        f"LVNs: {len(levels.lvns)}"
+        f"Long-term  POC: {long_term_levels.poc:.5f}  |  "
+        f"VAH: {long_term_levels.vah:.5f}  |  "
+        f"VAL: {long_term_levels.val:.5f}  |  "
+        f"HVNs: {len(long_term_levels.hvns)}  |  "
+        f"LVNs: {len(long_term_levels.lvns)}"
     )
 
-    # --- Visualize ---
-    from src.visualizer import plot_volume_profile
-    plot_volume_profile(df, levels, symbol=Config.SYMBOL)
+    # --- Priority 4: Build Multi-Session Profiles ---
+    multi_levels = build_multi_session_levels(df)
 
-    # --- Generate Signal ---
-    signal = generate_signal(df, levels)
+    # --- Visualize (long-term profile) ---
+    from src.visualizer import plot_volume_profile
+    plot_volume_profile(df, long_term_levels, symbol=Config.SYMBOL)
+
+    # --- Generate Signal (all 5 priorities active) ---
+    signal = generate_signal(
+        df           = df,
+        levels       = long_term_levels,
+        multi_levels = multi_levels,     # Priority 4 passed in
+    )
 
     if signal:
         lots = calculate_position_size(
@@ -62,15 +71,17 @@ def run():
             stop_loss_pips  = abs(signal.entry - signal.stop_loss) / 0.0001
         )
         log.info(f"""
-        =====================================
-        SIGNAL:      {signal.direction}
-        Reason:      {signal.reason}
-        Entry:       {signal.entry}
-        Stop Loss:   {signal.stop_loss}
-        Take Profit: {signal.take_profit}
-        R:R Ratio:   {signal.rr_ratio}
-        Lot Size:    {lots}
-        =====================================
+        =========================================
+        SIGNAL:       {signal.direction}
+        Reason:       {signal.reason}
+        Trend:        {signal.trend}
+        Confluences:  {signal.confluences}/4
+        Entry:        {signal.entry}
+        Stop Loss:    {signal.stop_loss}
+        Take Profit:  {signal.take_profit}
+        R:R Ratio:    {signal.rr_ratio}
+        Lot Size:     {lots}
+        =========================================
         """)
     else:
         log.info("No signal this bar — goblin waits patiently 🐲")
