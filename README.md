@@ -1,6 +1,6 @@
 # 🐲 Forex Volume Profile Bot
 
-> *Two goblins on a mission. Low risk. High discipline. Long term profits.*
+> Low risk. High discipline. Long term profits.*
 
 A professional-grade algorithmic trading system built in Python, using volume profile
 analysis to identify institutional price levels in the EURUSD forex market.
