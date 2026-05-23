@@ -17,8 +17,8 @@ class Config:
 
     # --- Volume Profile ---
     PROFILE_BINS       = 100
-    POC_ZONE_PIPS      = 3
-    HVN_THRESHOLD      = 0.7
+    POC_ZONE_PIPS      = 15
+    HVN_THRESHOLD      = 0.5
     LVN_THRESHOLD      = 0.3
 
     # --- Trade Management ---
