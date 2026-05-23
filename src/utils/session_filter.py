@@ -27,4 +27,14 @@ def get_active_session(dt: datetime) -> str | None:
         return None   # don't trade
 
 def is_tradeable_session(dt: datetime) -> bool:
+    """Returns True only during London or NY session, Mon-Fri"""
+    try:
+        ny_time = dt.astimezone(NY)
+    except Exception:
+        return True
+
+    # block weekends entirely
+    if ny_time.weekday() >= 5:
+        return False
+
     return get_active_session(dt) is not None
