@@ -17,13 +17,15 @@ class Config:
 
     # --- Volume Profile ---
     PROFILE_BINS       = 100
-    POC_ZONE_PIPS      = 15
-    HVN_THRESHOLD      = 0.5
+    POC_ZONE_PIPS      = 3
+    HVN_THRESHOLD      = 0.7
     LVN_THRESHOLD      = 0.3
 
     # --- Trade Management ---
     SPREAD_LIMIT_PIPS  = 2.0
     MIN_RR_RATIO       = 2.0
+    MAX_RR_RATIO       = 4.0    # ← ADD: cap unrealistic targets
+    MIN_CONFLUENCE     = 4      # ← ADD: only take best setups
     TRAIL_STOP         = True
 
     # --- Data ---

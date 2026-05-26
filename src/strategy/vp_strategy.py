@@ -71,8 +71,7 @@ def check_session_confluence(price: float,
                               pip_threshold: float = 20.0) -> int:
     """
     Priority 4 — Session Profile Confluence.
-    Count how many session POCs (daily/weekly/monthly/longterm)
-    are within pip_threshold of current price.
+    Count how many session POCs are within pip_threshold of price.
     More POCs clustered near price = stronger level.
     """
     pocs = {
@@ -101,14 +100,15 @@ def generate_signal(df: pd.DataFrame,
                     multi_levels: MultiSessionLevels = None,
                     pip_size: float = 0.0001) -> TradeSignal | None:
     """
-    Full signal logic with all five priority filters:
+    Full signal logic with all fixes applied:
 
     1. Price near POC or HVN
     2. Rejection candle (wick > body)
-    3. Volume above average at the level       <- Priority 3
-    4. Session POC confluence check            <- Priority 4
-    5. Trend filter - signal aligns with EMA   <- Priority 5
-    6. R:R minimum 2:1
+    3. Volume above average at the level
+    4. Session POC confluence check
+    5. Trend filter - signal aligns with EMA
+    6. Minimum confluence 4 — only best setups
+    7. R:R between 2:1 and 4:1 — no unrealistic targets
     """
     last  = df.iloc[-1]
     price = float(last['Close'])
@@ -125,45 +125,54 @@ def generate_signal(df: pd.DataFrame,
     if not (near_poc or near_hvn):
         return None
 
-    # Priority 3: volume confirmation
+    # volume confirmation
     if not volume_confirms_rejection(df):
         log.info("Signal rejected — volume too low at key level")
         return None
 
-    # detect candle direction before trend check
+    # detect candle direction
     is_bullish_candle = (lower_wick > body * 1.5 and
                          last['Close'] > last['Open'])
     is_bearish_candle = (upper_wick > body * 1.5 and
                          last['Close'] < last['Open'])
 
     if not (is_bullish_candle or is_bearish_candle):
-        return None  # no rejection candle
+        return None
 
     signal_direction = "BUY" if is_bullish_candle else "SELL"
 
-    # Priority 4: session confluence
+    # session confluence
     session_score = 0
     if multi_levels is not None:
         session_score = check_session_confluence(
             price, multi_levels, pip_size
         )
 
-    # Priority 5: trend alignment
+    # trend alignment
     if not is_trend_aligned(df, signal_direction):
-        log.info(
-            f"Signal rejected — {signal_direction} goes against trend"
-        )
+        log.info(f"Signal rejected — {signal_direction} goes against trend")
         return None
 
-    # count total confluences for logging
+    # count total confluences
     confluences = sum([
         near_poc,
         near_hvn,
         session_score > 0,
-        True,  # volume already confirmed above
+        True,   # volume already confirmed above
     ])
 
-    # Bullish rejection (hammer candle near level)
+    # FIX 1 — only take confluence 4 setups
+    # diagnosis showed: confluence 4 = +$0.76 avg pnl (profitable)
+    #                   confluence 2 = -$2.06 avg pnl (losing)
+    #                   confluence 3 = -$1.22 avg pnl (losing)
+    if confluences < Config.MIN_CONFLUENCE:
+        log.info(
+            f"Signal rejected — confluence {confluences} "
+            f"below minimum {Config.MIN_CONFLUENCE}"
+        )
+        return None
+
+    # ── Bullish rejection ─────────────────────────────────────────
     if is_bullish_candle:
         entry      = price
         stop_loss  = float(last['Low']) - (pip_size * 2)
@@ -181,6 +190,14 @@ def generate_signal(df: pd.DataFrame,
             log.info(f"Signal rejected — R:R {rr_ratio} below minimum")
             return None
 
+        # FIX 2 — cap unrealistic targets
+        # diagnosis showed rr_ratio > 4 almost always hit SL not TP
+        if rr_ratio > Config.MAX_RR_RATIO:
+            take_profit = entry + (sl_pips * Config.MAX_RR_RATIO * pip_size)
+            tp_pips     = (take_profit - entry) / pip_size
+            rr_ratio    = round(tp_pips / sl_pips, 2)
+            log.info(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
+
         trend_state = get_trend_state(df, "BUY")
 
         return TradeSignal(
@@ -192,11 +209,11 @@ def generate_signal(df: pd.DataFrame,
             reason      = (f"Bullish rejection + vol confirm + trend aligned "
                            f"at {'POC' if near_poc else 'HVN'} "
                            f"(session score: {session_score})"),
-            trend        = trend_state.direction,
-            confluences  = confluences,
+            trend       = trend_state.direction,
+            confluences = confluences,
         )
 
-    # Bearish rejection (shooting star near level)
+    # ── Bearish rejection ─────────────────────────────────────────
     if is_bearish_candle:
         entry      = price
         stop_loss  = float(last['High']) + (pip_size * 2)
@@ -214,6 +231,13 @@ def generate_signal(df: pd.DataFrame,
             log.info(f"Signal rejected — R:R {rr_ratio} below minimum")
             return None
 
+        # FIX 2 — cap unrealistic targets
+        if rr_ratio > Config.MAX_RR_RATIO:
+            take_profit = entry - (sl_pips * Config.MAX_RR_RATIO * pip_size)
+            tp_pips     = (entry - take_profit) / pip_size
+            rr_ratio    = round(tp_pips / sl_pips, 2)
+            log.info(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
+
         trend_state = get_trend_state(df, "SELL")
 
         return TradeSignal(
@@ -225,8 +249,8 @@ def generate_signal(df: pd.DataFrame,
             reason      = (f"Bearish rejection + vol confirm + trend aligned "
                            f"at {'POC' if near_poc else 'HVN'} "
                            f"(session score: {session_score})"),
-            trend        = trend_state.direction,
-            confluences  = confluences,
+            trend       = trend_state.direction,
+            confluences = confluences,
         )
 
     return None
