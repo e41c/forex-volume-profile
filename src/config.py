@@ -12,8 +12,10 @@ class Config:
     # --- Instrument ---
     SYMBOL             = "EURUSD"
     TIMEFRAME_PROFILE  = "H1"     # build volume profile on H1
+    TIMEFRAME_TREND    = "M15"    # trend detection timeframe
     TIMEFRAME_ENTRY    = "M15"    # entry confirmation on M15
     BARS               = 5000
+    M15_TREND_BARS     = 300      # M15 bars for trend window (300×15m = 75h ≈ 3 days)
 
     # --- Volume Profile ---
     PROFILE_BINS       = 100
@@ -42,7 +44,7 @@ class Config:
     # --- Circuit breaker ---
     # After N consecutive losses, pause trading for COOLDOWN_BARS H1 bars.
     # Protects capital when the system enters a bad regime.
-    MAX_CONSECUTIVE_LOSSES = 4
+    MAX_CONSECUTIVE_LOSSES = 3
     LOSS_COOLDOWN_BARS     = 48  # ~2 trading days
 
     # --- Data ---

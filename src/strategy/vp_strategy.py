@@ -101,24 +101,38 @@ def generate_signal(df: pd.DataFrame,
                     levels: VolumeProfileLevels,
                     multi_levels: MultiSessionLevels = None,
                     m15_df: pd.DataFrame = None,
-                    pip_size: float = 0.0001) -> TradeSignal | None:
+                    pip_size: float = 0.0001,
+                    entry_bar: pd.Series = None,
+                    min_wick_ratio: float = 1.5,
+                    _adx: float = None,
+                    _neutral: bool = None,
+                    _atr_pips: float = None) -> TradeSignal | None:
     """
     Full signal logic with all fixes applied:
 
     1. Price near POC or HVN
     2. ADX regime filter — ranging market only (ADX < 25)
-    3. Rejection candle (wick > body)
+    3. Rejection candle (wick > body × min_wick_ratio)
     4. Volume above average at the level
     5. Session POC confluence check
-    6. Trend filter on M15 (or H1 fallback) — NEUTRAL only
+    6. Trend filter on H1 — NEUTRAL only
     7. Minimum confluence 3
     8. ATR-based minimum SL — no noise-level stops
     9. R:R between 2:1 and 4:1
 
-    m15_df: M15 bars for trend + ADX detection (higher frequency NEUTRAL signals).
-            Falls back to df (H1) if not provided.
+    entry_bar:      optional M15 bar for candle pattern + SL placement.
+                    df (H1) is always used for regime checks (ADX, trend, ATR).
+    m15_df:         M15 window ending at entry_bar — used for M15 volume check.
+    min_wick_ratio: wick-to-body ratio required for rejection candle.
+                    H1 default = 1.5. M15 should use 2.0 (noisier timeframe).
+    _adx/_neutral/_atr_pips: pre-computed regime values from the backtester.
+                    When provided, the corresponding internal calculations are
+                    skipped — avoids recomputing ADX/trend/ATR for each M15
+                    sub-bar within the same H1 bar (5-10x runtime speedup).
     """
-    last  = df.iloc[-1]
+    # Candle-level checks use entry_bar when provided (M15 mode),
+    # otherwise fall back to last H1 bar.
+    last  = entry_bar if entry_bar is not None else df.iloc[-1]
     price = float(last['Close'])
     body  = abs(float(last['Close']) - float(last['Open']))
     upper_wick = float(last['High']) - max(float(last['Close']),
@@ -138,23 +152,27 @@ def generate_signal(df: pd.DataFrame,
     if not (near_poc or near_extra_hvn):
         return None
 
-    # ADX market regime filter on H1 — skip when market is trending
-    # M15 ADX was tried but is always < 25 (3.5h too short for meaningful trend strength).
-    # M15 is reserved for future entry candle work (tighter stops), not regime detection.
-    adx = calculate_adx(df)
+    # ADX market regime filter on H1 — skip when market is trending.
+    # Use pre-computed value when available (avoids redundant ewm per M15 sub-bar).
+    adx = _adx if _adx is not None else calculate_adx(df)
     if adx > Config.ADX_THRESHOLD:
         log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD} (trending)")
         return None
 
-    # volume confirmation
-    if not volume_confirms_rejection(df):
+    # volume confirmation — use M15 window when checking an M15 entry bar
+    # (H1 volume is aggregated across 4 sub-bars; M15 volume catches per-bar
+    # institutional activity more precisely)
+    vol_ctx = m15_df if (entry_bar is not None and m15_df is not None
+                         and len(m15_df) >= 10) else df
+    if not volume_confirms_rejection(vol_ctx):
         log.debug("Signal rejected — volume too low at key level")
         return None
 
-    # detect candle direction
-    is_bullish_candle = (lower_wick > body * 1.5 and
+    # detect candle direction — min_wick_ratio is 1.5 for H1, 2.0 for M15
+    # (M15 wicks are noisier; require stronger rejection to count)
+    is_bullish_candle = (lower_wick > body * min_wick_ratio and
                          last['Close'] > last['Open'])
-    is_bearish_candle = (upper_wick > body * 1.5 and
+    is_bearish_candle = (upper_wick > body * min_wick_ratio and
                          last['Close'] < last['Open'])
 
     if not (is_bullish_candle or is_bearish_candle):
@@ -170,7 +188,12 @@ def generate_signal(df: pd.DataFrame,
         )
 
     # trend alignment on H1 — NEUTRAL only (data: H1 NEUTRAL = 57% win, trending = losing)
-    if not is_trend_aligned(df, signal_direction):
+    # Use pre-computed neutral flag when available (same result, avoids 3 EWM calculations).
+    if _neutral is not None:
+        if not _neutral:
+            log.debug(f"Signal rejected — {signal_direction} goes against trend (pre-checked)")
+            return None
+    elif not is_trend_aligned(df, signal_direction):
         log.debug(f"Signal rejected — {signal_direction} goes against trend")
         return None
 
@@ -196,9 +219,9 @@ def generate_signal(df: pd.DataFrame,
         )
         return None
 
-    # ATR from H1 df — stop sizing relative to the level timeframe's volatility
-    atr         = calculate_atr(df)
-    atr_pips    = atr / pip_size
+    # ATR from H1 df — stop sizing relative to the level timeframe's volatility.
+    # Use pre-computed value when available.
+    atr_pips    = _atr_pips if _atr_pips is not None else calculate_atr(df) / pip_size
     min_sl_pips = atr_pips * Config.MIN_STOP_ATR_MULT
 
     # ── Bullish rejection ─────────────────────────────────────────

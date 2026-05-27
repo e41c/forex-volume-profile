@@ -27,6 +27,7 @@ from datetime import datetime, time
 from src.indicators.volume_profile import build_volume_profile
 from src.indicators.session_profile import build_multi_session_levels
 from src.strategy.vp_strategy import generate_signal, calculate_position_size
+from src.indicators.trend_filter import calculate_adx, calculate_atr, is_trend_aligned
 from src.utils.session_filter import is_tradeable_session
 from src.config import Config
 from src.utils.logger import get_logger
@@ -287,6 +288,7 @@ class BacktestResult:
 
 def run_backtest(
     df:                   pd.DataFrame,
+    df_m15:               pd.DataFrame  = None,
     costs:                TradingCosts  = None,
     profile_window:       int           = 500,
     warmup_bars:          int           = 500,
@@ -336,6 +338,20 @@ def run_backtest(
     # circuit breaker — pause after consecutive losses
     consecutive_losses = 0
     cooldown_until     = None
+
+    # M15 trend detection — pre-compute timestamp index for O(log n) lookups
+    _m15_times_ns = None
+    if df_m15 is not None and len(df_m15) > 0:
+        import numpy as np
+        # M15 index resolution is 'minute' → asi8 returns microseconds.
+        # Multiply by 1000 to get nanoseconds so comparisons with
+        # Timestamp.value (always nanoseconds) are on the same scale.
+        _m15_times_ns = df_m15.index.asi8 * 1000
+        log.info(
+            f"M15 trend detection enabled  |  "
+            f"{len(df_m15):,} bars  "
+            f"{df_m15.index[0].date()} → {df_m15.index[-1].date()}"
+        )
 
     log.info(
         f"Backtester starting  |  "
@@ -514,18 +530,88 @@ def run_backtest(
                 _session_multi_levels = None
         multi_levels = _session_multi_levels if use_session_profiles else None
 
+        # ── M15 trend window (O(log n) lookup via searchsorted) ────
+        m15_df = None
+        if _m15_times_ns is not None:
+            import numpy as np
+            t_ns    = current_time.value
+            m15_pos = int(np.searchsorted(_m15_times_ns, t_ns, side='right'))
+            if m15_pos >= 200:   # need at least 200 bars for EMA200
+                m15_df = df_m15.iloc[
+                    max(0, m15_pos - Config.M15_TREND_BARS):m15_pos
+                ]
+
         # ── signal check ───────────────────────────────────────────
         signal_df = df.iloc[max(0, i - 300):i + 1]
-        try:
-            signal = generate_signal(
-                df           = signal_df,
-                levels       = levels,
-                multi_levels = multi_levels,
-            )
-        except Exception as e:
-            if verbose:
-                log.warning(f"Signal error at bar {i}: {e}")
-            continue
+        signal    = None
+
+        # ── M15 entry candle scan (4× more opportunities per H1 bar) ──
+        # Regime detection (ADX, trend) runs on H1 inside generate_signal.
+        # Only the candle pattern and SL are taken from the M15 bar.
+        # This preserves the H1 NEUTRAL edge while multiplying entries.
+        #
+        # PERF: Pre-check regime once per H1 bar before scanning M15 sub-bars.
+        # ADX > 25 or not NEUTRAL → skip all 4 sub-bars immediately (~90% of bars).
+        # Each generate_signal call also passes skip_regime_checks=True so it
+        # won't recompute ADX/trend/ATR on the shared H1 signal_df.
+        # Pre-check H1 regime ONCE per bar (ADX + trend + ATR).
+        # If regime fails → skip entire M15 scan (~90% of bars eliminated here).
+        # Pre-computed values are passed to each M15 generate_signal call so
+        # ADX/trend/ATR are not recomputed 4× for the same H1 window.
+        _h1_adx      = calculate_adx(signal_df)
+        _h1_regime_ok = _h1_adx <= Config.ADX_THRESHOLD
+        _h1_neutral  = None
+        _h1_atr_pips = None
+        if _h1_regime_ok:
+            _h1_neutral  = is_trend_aligned(signal_df, 'BUY')  # direction-independent
+            _h1_atr_pips = calculate_atr(signal_df) / pip_size
+
+        if _h1_regime_ok and _m15_times_ns is not None:
+            h1_start_ns = current_time.value
+            h1_end_ns   = (current_time + pd.Timedelta(hours=1)).value
+            sub_start   = int(np.searchsorted(_m15_times_ns, h1_start_ns,
+                                              side='left'))
+            sub_end     = int(np.searchsorted(_m15_times_ns, h1_end_ns,
+                                              side='left'))
+
+            for m15_i in range(sub_start, sub_end):
+                m15_bar = df_m15.iloc[m15_i]
+                # M15 candles are smaller — 1 pip minimum body
+                if not has_minimum_body(m15_bar, pip_size, min_body_pips=1.0):
+                    continue
+                # Volume window for M15 bar (last 20 M15 bars)
+                m15_vol_window = df_m15.iloc[max(0, m15_i - 20):m15_i + 1]
+                try:
+                    signal = generate_signal(
+                        df             = signal_df,
+                        levels         = levels,
+                        multi_levels   = multi_levels,
+                        entry_bar      = m15_bar,
+                        m15_df         = m15_vol_window,
+                        min_wick_ratio = 2.0,   # stricter — M15 wicks are noisier
+                        _adx           = _h1_adx,
+                        _neutral       = _h1_neutral,
+                        _atr_pips      = _h1_atr_pips,
+                    )
+                except Exception as e:
+                    if verbose:
+                        log.warning(f"M15 signal error at {m15_i}: {e}")
+                    continue
+                if signal is not None:
+                    break  # take first valid M15 signal per H1 bar
+
+        # fallback: check the H1 bar itself if no M15 signal found
+        if signal is None:
+            try:
+                signal = generate_signal(
+                    df           = signal_df,
+                    levels       = levels,
+                    multi_levels = multi_levels,
+                )
+            except Exception as e:
+                if verbose:
+                    log.warning(f"Signal error at bar {i}: {e}")
+                continue
 
         if signal is None:
             continue
