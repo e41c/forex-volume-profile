@@ -100,17 +100,23 @@ def check_session_confluence(price: float,
 def generate_signal(df: pd.DataFrame,
                     levels: VolumeProfileLevels,
                     multi_levels: MultiSessionLevels = None,
+                    m15_df: pd.DataFrame = None,
                     pip_size: float = 0.0001) -> TradeSignal | None:
     """
     Full signal logic with all fixes applied:
 
     1. Price near POC or HVN
-    2. Rejection candle (wick > body)
-    3. Volume above average at the level
-    4. Session POC confluence check
-    5. Trend filter - signal aligns with EMA
-    6. Minimum confluence 4 — only best setups
-    7. R:R between 2:1 and 4:1 — no unrealistic targets
+    2. ADX regime filter — ranging market only (ADX < 25)
+    3. Rejection candle (wick > body)
+    4. Volume above average at the level
+    5. Session POC confluence check
+    6. Trend filter on M15 (or H1 fallback) — NEUTRAL only
+    7. Minimum confluence 3
+    8. ATR-based minimum SL — no noise-level stops
+    9. R:R between 2:1 and 4:1
+
+    m15_df: M15 bars for trend + ADX detection (higher frequency NEUTRAL signals).
+            Falls back to df (H1) if not provided.
     """
     last  = df.iloc[-1]
     price = float(last['Close'])
@@ -132,12 +138,12 @@ def generate_signal(df: pd.DataFrame,
     if not (near_poc or near_extra_hvn):
         return None
 
-    # ADX market regime filter — skip when market is trending
-    # Volume profile is mean-reversion: works in ranging markets (2008, 2020 = best years)
-    # Trending markets blow through POC levels (2014, 2024 = worst years, 0% win rate)
+    # ADX market regime filter on H1 — skip when market is trending
+    # M15 ADX was tried but is always < 25 (3.5h too short for meaningful trend strength).
+    # M15 is reserved for future entry candle work (tighter stops), not regime detection.
     adx = calculate_adx(df)
     if adx > Config.ADX_THRESHOLD:
-        log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD} (trending market, skip)")
+        log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD} (trending)")
         return None
 
     # volume confirmation
@@ -163,7 +169,7 @@ def generate_signal(df: pd.DataFrame,
             price, multi_levels, pip_size
         )
 
-    # trend alignment
+    # trend alignment on H1 — NEUTRAL only (data: H1 NEUTRAL = 57% win, trending = losing)
     if not is_trend_aligned(df, signal_direction):
         log.debug(f"Signal rejected — {signal_direction} goes against trend")
         return None
@@ -190,9 +196,9 @@ def generate_signal(df: pd.DataFrame,
         )
         return None
 
-    # pre-calculate ATR once for both directions
-    atr       = calculate_atr(df)
-    atr_pips  = atr / pip_size
+    # ATR from H1 df — stop sizing relative to the level timeframe's volatility
+    atr         = calculate_atr(df)
+    atr_pips    = atr / pip_size
     min_sl_pips = atr_pips * Config.MIN_STOP_ATR_MULT
 
     # ── Bullish rejection ─────────────────────────────────────────
