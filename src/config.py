@@ -25,8 +25,8 @@ class Config:
 
     # --- Trade Management ---
     SPREAD_LIMIT_PIPS  = 2.0
-    MIN_RR_RATIO       = 2.0
-    MAX_RR_RATIO       = 4.0    # cap unrealistic targets
+    MIN_RR_RATIO       = 1.5
+    MAX_RR_RATIO       = 2.0    # frequent small wins > rare large wins
     MIN_CONFLUENCE     = 3      # 3 = near level + session OR cluster + volume
     TRAIL_STOP         = True
 

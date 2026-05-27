@@ -297,10 +297,18 @@ def run_backtest(
     risk_percent:         float         = Config.RISK_PERCENT,
     use_session_profiles: bool          = True,
     min_body_pips:        float         = 2.0,
+    entry_wick_ratio:     float         = 2.0,
+    entry_min_body_pips:  float         = 1.0,
     verbose:              bool          = False,
 ) -> BacktestResult:
     """
     Walk-forward backtester — MT5 realistic simulation.
+
+    df_m15:             sub-H1 entry timeframe data (M15 or M30 resampled from M15).
+    entry_wick_ratio:   wick/body ratio for sub-bar rejection candles.
+                        M15 = 2.0, M30 = 1.8, H1 fallback always uses 1.5.
+    entry_min_body_pips: minimum candle body for sub-bar entries.
+                        M15 = 1.0 pip, M30 = 1.5 pips.
     """
     if costs is None:
         costs = TradingCosts()
@@ -576,10 +584,10 @@ def run_backtest(
 
             for m15_i in range(sub_start, sub_end):
                 m15_bar = df_m15.iloc[m15_i]
-                # M15 candles are smaller — 1 pip minimum body
-                if not has_minimum_body(m15_bar, pip_size, min_body_pips=1.0):
+                if not has_minimum_body(m15_bar, pip_size,
+                                        min_body_pips=entry_min_body_pips):
                     continue
-                # Volume window for M15 bar (last 20 M15 bars)
+                # Volume window for sub-bar (last 20 bars at that timeframe)
                 m15_vol_window = df_m15.iloc[max(0, m15_i - 20):m15_i + 1]
                 try:
                     signal = generate_signal(
@@ -588,7 +596,7 @@ def run_backtest(
                         multi_levels   = multi_levels,
                         entry_bar      = m15_bar,
                         m15_df         = m15_vol_window,
-                        min_wick_ratio = 2.0,   # stricter — M15 wicks are noisier
+                        min_wick_ratio = entry_wick_ratio,
                         _adx           = _h1_adx,
                         _neutral       = _h1_neutral,
                         _atr_pips      = _h1_atr_pips,

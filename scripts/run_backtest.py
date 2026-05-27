@@ -206,16 +206,28 @@ if __name__ == "__main__":
     )
 
     # load data
-    log.info("Loading EURUSD H1 from DuckDB...")
     provider = CSVProvider()
-    df = provider.get_ohlcv(
-        symbol    = Config.SYMBOL,
-        timeframe = Config.TIMEFRAME_PROFILE,
-    )
-    log.info(
-        f"Loaded {len(df):,} bars  "
-        f"{df.index[0].date()} → {df.index[-1].date()}"
-    )
+
+    log.info(f"Loading {Config.SYMBOL} {Config.TIMEFRAME_PROFILE} from DuckDB...")
+    df = provider.get_ohlcv(symbol=Config.SYMBOL, timeframe=Config.TIMEFRAME_PROFILE)
+    log.info(f"Loaded {len(df):,} bars  {df.index[0].date()} → {df.index[-1].date()}")
+
+    log.info(f"Loading {Config.SYMBOL} {Config.TIMEFRAME_TREND} for entry candles...")
+    df_m15 = provider.get_ohlcv(symbol=Config.SYMBOL, timeframe=Config.TIMEFRAME_TREND)
+    log.info(f"Loaded {len(df_m15):,} M15 bars  {df_m15.index[0].date()} → {df_m15.index[-1].date()}")
+
+    # Resample M15 → M30 for entry candles.
+    # M30 is the target entry timeframe: less noisy than M15, more frequent than H1.
+    # Resampling avoids needing a separate M30 data file.
+    df_m30 = df_m15.resample('30min').agg({
+        'Open':   'first',
+        'High':   'max',
+        'Low':    'min',
+        'Close':  'last',
+        'Volume': 'sum',
+    }).dropna()
+    log.info(f"Resampled → {len(df_m30):,} M30 bars  "
+             f"(2 per H1 bar vs 4 for M15 — less noise, same regime)")
 
     # run backtest
     log.info("Running walk-forward backtest...")
@@ -225,13 +237,16 @@ if __name__ == "__main__":
 
     result = run_backtest(
         df                   = df,
+        df_m15               = df_m30,      # M30 bars as entry timeframe
         costs                = costs,
         profile_window       = 500,
         warmup_bars          = 500,
         starting_balance     = Config.ACCOUNT_BALANCE,
         risk_percent         = Config.RISK_PERCENT,
         use_session_profiles = True,
-        verbose              = False,  # set True to see every signal
+        entry_wick_ratio     = 1.8,         # M30: less noisy than M15 (2.0), noisier than H1 (1.5)
+        entry_min_body_pips  = 1.5,         # M30 candles are larger than M15
+        verbose              = False,
     )
 
     elapsed = round(time.time() - start_time, 1)
