@@ -1,32 +1,61 @@
-# 🐲 Forex Volume Profile Bot
+# Forex Volume Profile Bot
 
-> Low risk. High discipline. Long term profits.*
+> Low risk. High discipline. Institutional-grade mean reversion.
 
-A professional-grade algorithmic trading system built in Python, using volume profile
-analysis to identify institutional price levels in the EURUSD forex market.
-Developed on macOS M1, designed to deploy on a Windows VPS running MetaTrader 5.
+A Python algorithmic trading system using volume profile analysis to identify institutional
+price levels in the EURUSD forex market. Built on macOS, designed to deploy on Windows VPS
+via MetaTrader 5.
 
 ---
 
-## 🗺️ Project Vision
+## Strategy Summary
 
 Most retail traders lose because they trade against institutions.
 This bot finds where institutions **have already traded** — the high-volume price nodes —
-and positions with them, not against them.
+and positions with them at rejection candles, not against them.
 
-Volume profile is not a retail indicator. It is what prop desks, hedge funds,
-and market makers use to understand where real value lives in the market.
-We are building a system that sees what they see.
+**Core edge:** Volume profile mean reversion at Point of Control (POC) and High Volume Node
+(HVN) levels. This edge only works in **ranging markets** — in trends, POC levels get blown
+through. The strategy therefore requires all three to be true before firing a signal:
+
+```
+1. Price at an institutional level (POC or HVN cluster)
+2. Ranging market (ADX < 25 — no strong trend)
+3. H1 trend regime is NEUTRAL (EMA50/200 + price structure + higher lows/highs all disagree)
+```
+
+All three together = institutional level + no trend fighting us = mean reversion edge.
 
 ---
 
-## ⚙️ Architecture Overview
+## Backtest Results (23-Year Walk-Forward, 2003–2026)
+
+EURUSD H1 volume profile, M15 entry candles, MT5-realistic costs (spread + slippage + swap).
+
+| Version | Trades | Win Rate | Profit Factor | Net Profit | Max DD | Notes |
+|---------|--------|----------|---------------|------------|--------|-------|
+| H1 only (baseline) | 14 | 57.1% | 3.35 | +19.7% | 2.5% | Too infrequent |
+| M15 entry (1.5× wick) | 78 | 35.9% | 1.35 | +26.3% | 15.7% | Too noisy |
+| **M15 entry (2.0× wick)** | **51** | **43.1%** | **1.91** | **+40.6%** | **7.6%** | **Current — all pass** |
+
+**Current strategy verdict: all 4 criteria pass**
+- Profit factor: 1.91 (need > 1.5)
+- Win rate: 43.1% (need > 40%)
+- Max drawdown: 7.6% (need < 20%)
+- Sharpe ratio: 4.73 (need > 1.0)
+
+Costs modelled to match forex.com Standard Account: 1.2 pip spread, 0.5 pip slippage,
+swap overnight, triple swap Wednesday, micro lot minimum, CAD account pip value.
+
+---
+
+## Architecture
 
 ```
-Mac M1 (Development & Backtesting)
-├── data/raw/          ← 15 years of broker EURUSD CSVs (gitignored)
+Mac (Development & Backtesting)
+├── data/raw/          ← 23 years of EURUSD CSVs (gitignored)
 ├── data/db/forex.db   ← DuckDB database (gitignored)
-└── src/               ← all strategy and analysis code
+└── src/               ← strategy and analysis code
 
           │  git push / pull
           ▼
@@ -37,254 +66,199 @@ GitHub (Private Repository)
           │  git pull
           ▼
 
-Windows VPS (Live Execution — future)
+Windows VPS (Live Execution — Phase 5)
 ├── MetaTrader5 running
 └── Python bot connected via MT5 API
 ```
 
-### Why This Architecture
-
-- **Mac M1** does not support the MT5 Python API — so all development,
-  backtesting and research happens here using historical CSV data
-- **DuckDB** stores all historical data locally — no server required,
-  single file, handles hundreds of millions of rows with ease
-- **BaseDataProvider abstraction** means strategy code never changes
-  between environments — only the data source swaps
-- **Windows VPS** runs MT5 and the live bot — pulls the same codebase
-  from GitHub, swaps to the MT5 provider automatically
+Mac does not support the MT5 Python API — all development and backtesting uses DuckDB
+with historical CSVs. The `BaseDataProvider` abstraction means strategy code never
+changes between environments — only the data source swaps.
 
 ---
 
-## 📁 Project Structure
+## Multi-Timeframe Design
+
+```
+H1  — Volume profile (which levels matter)
+H1  — Regime detection (ADX + NEUTRAL trend filter)
+M15 — Entry candles (rejection pattern at H1 levels, tighter SL)
+M15 — Trade management (TP/SL checked each bar)
+```
+
+The H1 timeframe is wide enough for the volume profile to capture meaningful institutional
+activity. M15 sub-bars within each NEUTRAL H1 bar give 4× more entry opportunities without
+loosening the regime filter. M15 wicks give tighter stops.
+
+---
+
+## Signal Logic (in order)
+
+```
+1. Price within 5 pips of H1 POC or non-POC HVN
+2. H1 ADX < 25  (ranging market only — trending markets blow through levels)
+3. H1 trend = NEUTRAL  (EMA50/200 crossover + price vs EMA200 + price structure)
+4. Rejection candle at level:
+     H1 bar: wick > body × 1.5
+     M15 bar: wick > body × 2.0  (noisier timeframe needs stricter filter)
+5. Volume above 20-bar average at that timeframe
+6. Session POC confluence ≥ 2 timeframes (weekly/monthly/daily POCs near price)
+7. Minimum 3 confluences total
+8. Stop loss ≥ 40% of H1 ATR(14) — stops smaller than this get hit by noise
+9. R:R between 2:1 and 4:1 — TP at nearest LVN above/below entry
+```
+
+---
+
+## Project Structure
 
 ```
 forex-volume-profile/
 ├── data/
 │   ├── raw/                        ← broker CSVs by year (gitignored)
-│   │   └── EURUSD_GMT+2_US-DST_YYYY/
-│   │       ├── *_bars_M1.csv
-│   │       ├── *_bars_M5.csv
-│   │       ├── *_bars_M15.csv
-│   │       ├── *_bars_M30.csv
-│   │       ├── *_bars_H1.csv
-│   │       ├── *_bars_H4.csv
-│   │       ├── *_bars_D1.csv
-│   │       ├── *_bars_W1.csv
-│   │       └── *_bars_MN1.csv
-│   ├── db/
-│   │   └── forex.db                ← DuckDB (gitignored)
-│   └── processed/                  ← charts, parquet cache (gitignored)
+│   ├── db/forex.db                 ← DuckDB (gitignored)
+│   └── processed/                  ← charts, trade journal (gitignored)
 ├── logs/                           ← runtime logs (gitignored)
 ├── notebooks/                      ← Jupyter research notebooks
+│   └── 01_strategy_explorer.ipynb  ← interactive volume profile + signal walkthrough
 ├── scripts/
-│   └── import_csv.py               ← one-shot CSV importer
+│   ├── import_csv.py               ← one-shot CSV importer
+│   └── run_backtest.py             ← full walk-forward backtest + chart
 ├── src/
 │   ├── config.py                   ← all parameters in one place
-│   ├── main.py                     ← entry point
-│   ├── visualizer.py               ← chart rendering
+│   ├── backtester.py               ← MT5-realistic walk-forward backtester
+│   ├── main.py                     ← live trading entry point (future)
 │   ├── data/
 │   │   ├── base_provider.py        ← abstract data contract
 │   │   ├── csv_provider.py         ← Mac: reads from DuckDB
 │   │   └── mt5_provider.py         ← Windows: reads from MT5 API
 │   ├── indicators/
-│   │   └── volume_profile.py       ← POC, HVN, LVN detection
+│   │   ├── volume_profile.py       ← POC, HVN, LVN detection
+│   │   ├── session_profile.py      ← multi-TF session POC confluence
+│   │   └── trend_filter.py         ← EMA, ADX, ATR, regime detection
 │   ├── strategy/
 │   │   └── vp_strategy.py          ← signal generation, position sizing
 │   └── utils/
-│       └── logger.py               ← structured logging
-├── tests/
-│   └── test_volume_profile.py
-├── .env.example                    ← MT5 credentials template
-├── requirements.txt
-└── README.md
+│       ├── logger.py               ← structured logging
+│       └── session_filter.py       ← London/NY session filter
+└── tests/
+    └── test_volume_profile.py
 ```
 
 ---
 
-## ✅ What Is Built — Phase 1 & 2 Complete
+## Key Parameters (src/config.py)
 
-### Data Infrastructure
-- [x] 15 years of EURUSD data (M1 through MN1) stored in DuckDB
-- [x] Broker timezone conversion: GMT+2 US DST → UTC automatically
-- [x] Smart CSV importer — skips already-imported years, handles all timeframes
-- [x] MT5-compatible data format throughout — zero conversion needed at deployment
-- [x] Data cached in parquet for fast repeated access
-
-### Analysis Engine
-- [x] Volume profile builder from OHLCV data
-- [x] Point of Control (POC) — highest volume price level
-- [x] High Volume Nodes (HVN) — institutional accumulation zones
-- [x] Low Volume Nodes (LVN) — fast-move zones, used as targets
-- [x] Multi-timeframe data access (any timeframe, any date range)
-
-### Signal Framework
-- [x] Candle rejection detection at POC and HVN levels
-- [x] Bullish and bearish signal identification
-- [x] Minimum R:R ratio filter (default 2:1)
-- [x] 1% risk position size calculator
-- [x] Max trades per day limit
-
-### Visualizer
-- [x] Dark-themed price chart with POC, HVN, LVN overlaid
-- [x] Volume profile histogram with colour-coded levels
-- [x] Chart saved as PNG automatically
-
-### Developer Experience
-- [x] Structured logging to file and terminal
-- [x] Single config.py — all parameters in one place
-- [x] OS auto-detection — Mac uses CSV/DuckDB, Windows uses MT5
-- [x] .env for secrets — never hardcoded, never pushed to GitHub
-- [x] Full .gitignore — data, secrets, logs all protected
+| Parameter | Value | Why |
+|-----------|-------|-----|
+| `POC_ZONE_PIPS` | 5 | H1 bins are ~4 pips wide — 3 was too tight |
+| `HVN_THRESHOLD` | 0.70 | Bins with volume ≥ 70% of max bin |
+| `ADX_THRESHOLD` | 25.0 | Skip signals when market is trending |
+| `MIN_STOP_ATR_MULT` | 0.40 | SL must be ≥ 40% of ATR(14) to avoid noise hits |
+| `MIN_RR_RATIO` | 2.0 | Minimum 2:1 reward-to-risk |
+| `MAX_RR_RATIO` | 4.0 | Cap targets — R:R > 4 almost always hits SL not TP |
+| `MIN_CONFLUENCE` | 3 | Need ≥ 3 independent filters confirming the level |
+| `MAX_CONSECUTIVE_LOSSES` | 3 | Circuit breaker — pause after 3 losses in a row |
+| `LOSS_COOLDOWN_BARS` | 48 | ~2 trading days pause after circuit breaker fires |
 
 ---
 
-## 🔮 Roadmap — What We Are Building Next
+## What Works (Data-Backed)
 
-### Phase 3 — Backtesting Engine
-- [ ] Walk-forward backtester across all 15 years of data
-- [ ] Performance metrics: win rate, profit factor, max drawdown, Sharpe ratio
-- [ ] Trade journal export to CSV — every signal logged
-- [ ] Parameter optimisation — find best BINS, HVN threshold, pip zones
-- [ ] Equity curve visualisation
-
-### Phase 4 — Strategy Refinement
-- [ ] Rolling volume profile (session-based, not full-history)
-- [ ] Multi-timeframe confluence — H1 profile + M15 entry
-- [ ] News filter — skip trading around high-impact events
-- [ ] Session filter — only trade London and New York sessions
-- [ ] Spread filter — skip when spread exceeds threshold
-
-### Phase 5 — MT5 Integration (Windows VPS)
-- [ ] MT5 provider fully wired and tested on demo account
-- [ ] Automated order placement with stop loss and take profit
-- [ ] Trailing stop to breakeven at 1:1 R
-- [ ] Position monitoring and partial close logic
-- [ ] Telegram alerts — signal fired, trade opened, trade closed
-
-### Phase 6 — VPS Deployment
-- [ ] Windows VPS setup and hardening
-- [ ] Bot runs as a scheduled task — 24 hours, 5 days a week
-- [ ] Health monitoring — alert if bot goes silent
-- [ ] Weekly performance report generated automatically
-- [ ] Remote log access
-
-### Phase 7 — Live Trading
-- [ ] Minimum 3 months profitable on demo before going live
-- [ ] $1000 CAD starting capital
-- [ ] 1% risk per trade — maximum $10 CAD risk at entry
-- [ ] Monthly performance review and parameter adjustment
-- [ ] Scale account size only after consistent profitability
+- **NEUTRAL regime only** — BULLISH/BEARISH trend states lose (POC levels get blown through
+  in trending markets). NEUTRAL = 57% win rate. Trending = 24-28% win rate.
+- **ADX < 25 filter** — removes trending periods. Best years were 2008 crisis and 2020 COVID
+  (ranging volatility). Worst years were 2014 and 2024 (sustained directional trends).
+- **Session POC confluence ≥ 2** — score = 1 averages −2.45 pips. Score ≥ 2 averages
+  +2.06 pips. Single TF alignment is noise; multi-TF clustering is signal.
+- **ATR minimum stop** — stops < 40% of ATR(14) get hit by random noise.
+  Eliminated many small-SL losing trades.
+- **Circuit breaker** — protects capital during regime transitions. Fired 5 times across
+  23 years at known bad periods: 2011, 2015, 2018, 2022, 2023.
+- **M15 entries (2.0× wick)** — 3.6× more signals than H1 alone at similar quality.
+  Requires 2.0× wick/body ratio (vs 1.5× for H1) to filter out M15 noise.
 
 ---
 
-## 🐲 Goblin Trading Rules — Non-Negotiable
-
-These rules exist because discipline is the only edge that cannot be back-tested away.
-
-```
-1. Never risk more than 1% per trade
-2. Never trade more than 3 times per day
-3. Never move a stop loss further away — only to breakeven or closer
-4. Never trade during major news events
-5. Demo trade for minimum 3 months before any real money
-6. If the bot has 3 consecutive losses — pause and review
-7. The bot never overrides these rules — ever
-```
-
----
-
-## 🚀 Quick Start
-
-### Prerequisites
-- Python 3.9+
-- macOS M1 (development) or Windows (live execution)
-
-### Setup
+## Running the Backtest
 
 ```bash
-# clone
-git clone https://github.com/YOURUSERNAME/forex-volume-profile.git
+source venv/bin/activate
+python scripts/run_backtest.py
+```
+
+Output: terminal results + equity curve chart at `data/processed/EURUSD_backtest_results.png`
++ trade journal at `data/processed/trade_journal.csv`.
+
+---
+
+## Jupyter Notebooks (Strategy Explorer)
+
+For interactive exploration, signal visualization, and parameter tuning:
+
+```bash
+source venv/bin/activate
+pip install jupyter
+jupyter notebook notebooks/01_strategy_explorer.ipynb
+```
+
+The notebook covers:
+- Volume profile visualization (price chart + histogram)
+- Signal walkthrough on specific dates
+- Trade journal analysis by year, direction, confluence
+- Equity curve comparison across parameter settings
+
+---
+
+## Setup
+
+```bash
+git clone https://github.com/e41c/forex-volume-profile.git
 cd forex-volume-profile
-
-# virtual environment
 python3 -m venv venv
-source venv/bin/activate          # Mac
-# venv\Scripts\activate           # Windows
-
-# dependencies
+source venv/bin/activate
 pip install -r requirements.txt
-
-# environment variables
-cp .env.example .env
-# edit .env with your MT5 credentials (Windows only)
+cp .env.example .env   # add MT5 credentials (Windows only)
 ```
 
-### Import Historical Data (Mac)
-
+Import historical data (drop year folders into `data/raw/` first):
 ```bash
-# drop your year folders into data/raw/ then:
 python scripts/import_csv.py
 ```
 
-### Run The Bot
+---
 
-```bash
-python -m src.main
+## Goblin Trading Rules
+
+Discipline is the only edge that cannot be backtested away.
+
+```
+1. Never risk more than 1% per trade
+2. Circuit breaker: stop after 3 consecutive losses, pause 48 hours
+3. Never move a stop loss further away — only to breakeven or closer
+4. Never trade during major news events
+5. 3 months profitable on demo before any real money
+6. Strategy only fires in NEUTRAL regime — never override this
+7. Scale lot size up only after 6 consecutive profitable months
 ```
 
 ---
 
-## 📦 Dependencies
+## Roadmap
 
-```
-pandas          — data manipulation
-numpy           — numerical operations
-duckdb          — local time-series database
-pytz            — timezone conversion
-matplotlib      — charting
-mplfinance      — candlestick charts
-python-dotenv   — environment variable management
-pytest          — testing
-pyarrow         — parquet file support
-MetaTrader5     — MT5 API (Windows only)
-```
-
----
-
-## 🔐 Security
-
-- `.env` is gitignored — MT5 credentials never leave your machine
-- `data/` is gitignored — historical data stays local
-- `logs/` is gitignored — runtime logs stay local
-- Only source code is pushed to GitHub
+- [x] Data infrastructure (DuckDB, 23-year EURUSD, all timeframes)
+- [x] Volume profile engine (POC, HVN, LVN)
+- [x] Multi-timeframe session profiles (daily/weekly/monthly POC confluence)
+- [x] Trend filter (EMA, ADX, ATR, NEUTRAL regime detection)
+- [x] Walk-forward backtester (MT5-realistic costs, circuit breaker, equity curve)
+- [x] M15 entry candles at H1 levels (3.6× more signals, regime unchanged)
+- [ ] M30 entry timeframe experiment (less noise than M15, more frequent than H1)
+- [ ] Lower R:R target (1.5:1) for more consistent small wins
+- [ ] Multi-pair expansion (GBPUSD, USDJPY — same logic, more opportunities)
+- [ ] News filter (skip ±30 min around high-impact events)
+- [ ] MT5 live execution (Windows VPS, demo first)
+- [ ] Telegram alerts
 
 ---
 
-## 📊 Data Format
-
-All data is stored and processed in **MT5-compatible UTC format**:
-
-| Column | Type | Description |
-|--------|------|-------------|
-| time | TIMESTAMPTZ | UTC timestamp (converted from broker GMT+2 US DST) |
-| open | DOUBLE | Bar open price |
-| high | DOUBLE | Bar high price |
-| low | DOUBLE | Bar low price |
-| close | DOUBLE | Bar close price |
-| volume | BIGINT | Tick volume |
-
-Source data: EURUSD, broker GMT+2 with US DST rules, 2003–present
-Timeframes available: M1, M5, M15, M30, H1, H4, D1, W1, MN1
-
----
-
-## 🤝 About This Project
-
-Built by two goblins who believe retail traders deserve institutional tools.
-
-> *"The market is a device for transferring money from the impatient to the patient."*
-> — Warren Buffett, honorary goblin
-
----
-
-*Last updated: May 2026*
+*Built by two goblins. Last updated: May 2026.*
