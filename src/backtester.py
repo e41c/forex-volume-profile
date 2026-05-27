@@ -329,6 +329,14 @@ def run_backtest(
     total_bars    = len(df)
     start_bar     = max(warmup_bars, profile_window)
 
+    # session profile cache — rebuild once per trading day, not every bar
+    _session_multi_levels = None
+    _session_last_date    = None
+
+    # circuit breaker — pause after consecutive losses
+    consecutive_losses = 0
+    cooldown_until     = None
+
     log.info(
         f"Backtester starting  |  "
         f"Bars: {total_bars:,}  |  "
@@ -395,6 +403,19 @@ def run_backtest(
                 balance   += pnl_cad
                 result_str = 'WIN' if net_pips > 0 else 'LOSS'
 
+                # circuit breaker tracking
+                if result_str == 'WIN':
+                    consecutive_losses = 0
+                else:
+                    consecutive_losses += 1
+                    if consecutive_losses >= Config.MAX_CONSECUTIVE_LOSSES:
+                        cooldown_until     = current_time + pd.Timedelta(hours=Config.LOSS_COOLDOWN_BARS)
+                        consecutive_losses = 0
+                        log.info(
+                            f"Circuit breaker — {Config.MAX_CONSECUTIVE_LOSSES} losses in a row, "
+                            f"pausing until {cooldown_until.strftime('%Y-%m-%d %H:%M')}"
+                        )
+
                 if pnl_cad > 0:
                     result.wins         += 1
                     result.gross_profit += pnl_cad
@@ -452,6 +473,10 @@ def run_backtest(
 
             continue
 
+        # ── circuit breaker cooldown ──────────────────────────────
+        if cooldown_until is not None and current_time < cooldown_until:
+            continue
+
         # ── session filter ────────────────────────────────────────
         if not is_tradeable_session(current_time):
             continue
@@ -477,13 +502,17 @@ def run_backtest(
                 log.warning(f"Profile build failed at bar {i}: {e}")
             continue
 
-        # ── session profiles ───────────────────────────────────────
-        multi_levels = None
-        if use_session_profiles:
+        # ── session profiles (cached daily — no need to rebuild every bar) ──
+        if use_session_profiles and current_time.date() != _session_last_date:
             try:
-                multi_levels = build_multi_session_levels(window_df)
+                # Use 2000-bar window so long_term POC is actually long-term,
+                # not the same 500-bar slice as the rolling profile
+                session_window        = df.iloc[max(0, i - 2000):i]
+                _session_multi_levels = build_multi_session_levels(session_window)
+                _session_last_date    = current_time.date()
             except Exception:
-                pass
+                _session_multi_levels = None
+        multi_levels = _session_multi_levels if use_session_profiles else None
 
         # ── signal check ───────────────────────────────────────────
         signal_df = df.iloc[max(0, i - 300):i + 1]

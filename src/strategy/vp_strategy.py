@@ -3,7 +3,9 @@ import pandas as pd
 from dataclasses import dataclass
 from src.indicators.volume_profile import VolumeProfileLevels, price_near_level
 from src.indicators.session_profile import MultiSessionLevels, poc_confluence
-from src.indicators.trend_filter import is_trend_aligned, get_trend_state
+from src.indicators.trend_filter import (
+    is_trend_aligned, get_trend_state, calculate_adx, calculate_atr
+)
 from src.config import Config
 from src.utils.logger import get_logger
 
@@ -52,14 +54,14 @@ def volume_confirms_rejection(df: pd.DataFrame,
     confirmed   = last_volume > avg_volume * 1.2
 
     if not confirmed:
-        log.info(
+        log.debug(
             f"Volume confirmation failed — "
             f"last: {last_volume:.0f}  avg: {avg_volume:.0f}  "
             f"need: {avg_volume * 1.2:.0f}"
         )
     else:
-        log.info(
-            f"Volume confirmed✅ — "
+        log.debug(
+            f"Volume confirmed — "
             f"last: {last_volume:.0f}  avg: {avg_volume:.0f}"
         )
     return confirmed
@@ -88,9 +90,9 @@ def check_session_confluence(price: float,
             nearby.append(name)
 
     if nearby:
-        log.info(f"Session confluence✅ — POCs nearby: {nearby}")
+        log.debug(f"Session confluence — POCs nearby: {nearby}")
     else:
-        log.info("No session POC confluence near current price")
+        log.debug("No session POC confluence near current price")
 
     return len(nearby)
 
@@ -119,15 +121,28 @@ def generate_signal(df: pd.DataFrame,
                      float(last['Open'])) - float(last['Low'])
 
     near_poc = price_near_level(price, levels.poc, pip_size)
-    near_hvn = any(price_near_level(price, h, pip_size)
-                   for h in levels.hvns)
 
-    if not (near_poc or near_hvn):
+    # HVNs that are NOT the POC itself — true cluster confirmation
+    # (POC is always an HVN, so near_hvn was double-counting near_poc)
+    non_poc_hvns   = [h for h in levels.hvns
+                      if abs(h - levels.poc) / pip_size > Config.POC_ZONE_PIPS]
+    near_extra_hvn = any(price_near_level(price, h, pip_size)
+                         for h in non_poc_hvns)
+
+    if not (near_poc or near_extra_hvn):
+        return None
+
+    # ADX market regime filter — skip when market is trending
+    # Volume profile is mean-reversion: works in ranging markets (2008, 2020 = best years)
+    # Trending markets blow through POC levels (2014, 2024 = worst years, 0% win rate)
+    adx = calculate_adx(df)
+    if adx > Config.ADX_THRESHOLD:
+        log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD} (trending market, skip)")
         return None
 
     # volume confirmation
     if not volume_confirms_rejection(df):
-        log.info("Signal rejected — volume too low at key level")
+        log.debug("Signal rejected — volume too low at key level")
         return None
 
     # detect candle direction
@@ -150,33 +165,49 @@ def generate_signal(df: pd.DataFrame,
 
     # trend alignment
     if not is_trend_aligned(df, signal_direction):
-        log.info(f"Signal rejected — {signal_direction} goes against trend")
+        log.debug(f"Signal rejected — {signal_direction} goes against trend")
         return None
 
-    # count total confluences
+    # count independent confluences:
+    #   near_poc       — price at highest-volume node
+    #   near_extra_hvn — price also near a separate HVN cluster (independent of POC)
+    #   session_score  — multi-timeframe POC alignment (need ≥ 2 TFs to count)
+    #   volume         — always True (hard-checked above, confirmed institutional interest)
+    #
+    # session_score >= 2 required to count: data shows score=1 averages -2.45 pips,
+    # score=2 averages +2.06 pips — single TF alignment is noise, not signal
     confluences = sum([
         near_poc,
-        near_hvn,
-        session_score > 0,
+        near_extra_hvn,
+        session_score >= 2,
         True,   # volume already confirmed above
     ])
 
-    # FIX 1 — only take confluence 4 setups
-    # diagnosis showed: confluence 4 = +$0.76 avg pnl (profitable)
-    #                   confluence 2 = -$2.06 avg pnl (losing)
-    #                   confluence 3 = -$1.22 avg pnl (losing)
     if confluences < Config.MIN_CONFLUENCE:
-        log.info(
+        log.debug(
             f"Signal rejected — confluence {confluences} "
             f"below minimum {Config.MIN_CONFLUENCE}"
         )
         return None
+
+    # pre-calculate ATR once for both directions
+    atr       = calculate_atr(df)
+    atr_pips  = atr / pip_size
+    min_sl_pips = atr_pips * Config.MIN_STOP_ATR_MULT
 
     # ── Bullish rejection ─────────────────────────────────────────
     if is_bullish_candle:
         entry      = price
         stop_loss  = float(last['Low']) - (pip_size * 2)
         sl_pips    = (entry - stop_loss) / pip_size
+
+        # Minimum stop distance — stops smaller than 0.4×ATR get hit by noise
+        if sl_pips < min_sl_pips:
+            log.debug(
+                f"Signal rejected — SL {sl_pips:.1f} pips < "
+                f"min {min_sl_pips:.1f} (40% of ATR {atr_pips:.1f})"
+            )
+            return None
 
         lvns_above  = [l for l in levels.lvns if l > entry]
         take_profit = (min(lvns_above) if lvns_above
@@ -187,7 +218,7 @@ def generate_signal(df: pd.DataFrame,
         rr_ratio = round(tp_pips / sl_pips, 2)
 
         if rr_ratio < Config.MIN_RR_RATIO:
-            log.info(f"Signal rejected — R:R {rr_ratio} below minimum")
+            log.debug(f"Signal rejected — R:R {rr_ratio} below minimum")
             return None
 
         # FIX 2 — cap unrealistic targets
@@ -196,7 +227,7 @@ def generate_signal(df: pd.DataFrame,
             take_profit = entry + (sl_pips * Config.MAX_RR_RATIO * pip_size)
             tp_pips     = (take_profit - entry) / pip_size
             rr_ratio    = round(tp_pips / sl_pips, 2)
-            log.info(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
+            log.debug(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
 
         trend_state = get_trend_state(df, "BUY")
 
@@ -207,7 +238,7 @@ def generate_signal(df: pd.DataFrame,
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
             reason      = (f"Bullish rejection + vol confirm + trend aligned "
-                           f"at {'POC' if near_poc else 'HVN'} "
+                           f"at {'POC' if near_poc else 'HVN cluster'} "
                            f"(session score: {session_score})"),
             trend       = trend_state.direction,
             confluences = confluences,
@@ -219,6 +250,14 @@ def generate_signal(df: pd.DataFrame,
         stop_loss  = float(last['High']) + (pip_size * 2)
         sl_pips    = (stop_loss - entry) / pip_size
 
+        # Minimum stop distance — stops smaller than 0.4×ATR get hit by noise
+        if sl_pips < min_sl_pips:
+            log.debug(
+                f"Signal rejected — SL {sl_pips:.1f} pips < "
+                f"min {min_sl_pips:.1f} (40% of ATR {atr_pips:.1f})"
+            )
+            return None
+
         lvns_below  = [l for l in levels.lvns if l < entry]
         take_profit = (max(lvns_below) if lvns_below
                        else entry - (sl_pips * Config.MIN_RR_RATIO
@@ -228,7 +267,7 @@ def generate_signal(df: pd.DataFrame,
         rr_ratio = round(tp_pips / sl_pips, 2)
 
         if rr_ratio < Config.MIN_RR_RATIO:
-            log.info(f"Signal rejected — R:R {rr_ratio} below minimum")
+            log.debug(f"Signal rejected — R:R {rr_ratio} below minimum")
             return None
 
         # FIX 2 — cap unrealistic targets
@@ -236,7 +275,7 @@ def generate_signal(df: pd.DataFrame,
             take_profit = entry - (sl_pips * Config.MAX_RR_RATIO * pip_size)
             tp_pips     = (entry - take_profit) / pip_size
             rr_ratio    = round(tp_pips / sl_pips, 2)
-            log.info(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
+            log.debug(f"TP capped at {Config.MAX_RR_RATIO}:1 → {take_profit:.5f}")
 
         trend_state = get_trend_state(df, "SELL")
 
@@ -247,7 +286,7 @@ def generate_signal(df: pd.DataFrame,
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
             reason      = (f"Bearish rejection + vol confirm + trend aligned "
-                           f"at {'POC' if near_poc else 'HVN'} "
+                           f"at {'POC' if near_poc else 'HVN cluster'} "
                            f"(session score: {session_score})"),
             trend       = trend_state.direction,
             confluences = confluences,

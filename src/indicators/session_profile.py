@@ -63,7 +63,7 @@ def build_session_profile(df: pd.DataFrame,
     else:
         session_df = df.tail(bars)
 
-    log.info(
+    log.debug(
         f"Building {session} profile on {len(session_df)} bars  "
         f"({session_df.index[0].strftime('%Y-%m-%d %H:%M')} → "
         f"{session_df.index[-1].strftime('%Y-%m-%d %H:%M')})"
@@ -77,14 +77,14 @@ def build_multi_session_levels(df: pd.DataFrame) -> MultiSessionLevels:
     Build all four profiles at once.
     Long-term uses all data. Sessions use rolling windows.
     """
-    log.info("Building multi-session volume profiles...")
+    log.debug("Building multi-session volume profiles...")
 
     long_term = build_volume_profile(df, bins=100)
     daily     = build_session_profile(df, "daily",   bins=50)
     weekly    = build_session_profile(df, "weekly",  bins=75)
     monthly   = build_session_profile(df, "monthly", bins=100)
 
-    log.info(
+    log.debug(
         f"Multi-session profiles built:\n"
         f"  Long-term  POC: {long_term.poc:.5f}  "
         f"VAH: {long_term.vah:.5f}  VAL: {long_term.val:.5f}\n"
@@ -138,8 +138,8 @@ def poc_confluence(levels: MultiSessionLevels,
                 }
 
     if confluent:
-        log.info(f"POC confluence detected: {list(confluent.keys())}")
+        log.debug(f"POC confluence detected: {list(confluent.keys())}")
     else:
-        log.info("No POC confluence found at current levels")
+        log.debug("No POC confluence found at current levels")
 
     return confluent

@@ -11,6 +11,14 @@ Three layers of trend confirmation:
   3. Higher highs/lows       — is price structure bullish or bearish?
 
 All three pointing the same way = strong trend confirmation.
+
+Also provides ADX-based market regime detection:
+  Volume profile is a mean-reversion strategy — it works in ranging markets.
+  ADX < 25  = ranging  = good
+  ADX > 25  = trending = skip (price blows through POC levels)
+  Data: 2008 crisis (+25 pips avg) and 2020 COVID (+16 pips avg) were top years
+        because crises create ranging volatility. 2009/2014/2024 were worst
+        because sustained trends made POC levels irrelevant.
 """
 import pandas as pd
 import numpy as np
@@ -131,18 +139,16 @@ def get_trend_state(df: pd.DataFrame,
         strength  = 0
 
     # ── Check signal alignment ──────────────────────────────────
+    # NEUTRAL-only mode: volume profile mean-reversion only works in ranging
+    # markets. Data: NEUTRAL = 57% win +26 pips. BULLISH/BEARISH = 24-28% losing.
     if signal_direction is None:
         aligned = True
     elif direction == "NEUTRAL":
-        aligned = True    # neutral trend doesn't block signals
-    elif signal_direction == "BUY"  and direction == "BULLISH":
-        aligned = True
-    elif signal_direction == "SELL" and direction == "BEARISH":
-        aligned = True
+        aligned = True    # ranging market — take the signal
     else:
-        aligned = False   # signal goes against the trend
+        aligned = False   # trending market — POC levels get blown through
 
-    log.info(
+    log.debug(
         f"Trend analysis: {direction} (strength {strength}/3)  |  "
         f"EMA50: {current_ema50:.5f}  EMA200: {current_ema200:.5f}  |  "
         f"Price: {price_vs_ema} EMA200  |  "
@@ -170,9 +176,73 @@ def is_trend_aligned(df: pd.DataFrame,
     state = get_trend_state(df, signal_direction)
 
     if not state.aligned:
-        log.info(
+        log.debug(
             f"Trend filter blocked {signal_direction} signal — "
             f"trend is {state.direction}"
         )
 
     return state.aligned
+
+
+def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Calculate Average Directional Index (ADX).
+
+    ADX measures trend STRENGTH, not direction.
+      ADX < 20  — ranging / no trend        (ideal for volume profile)
+      ADX 20-25 — weak trend, borderline
+      ADX > 25  — trending market           (POC levels get blown through)
+      ADX > 40  — very strong trend         (avoid at all costs)
+
+    Returns current ADX value (0-100).
+    """
+    if len(df) < period * 3:
+        return 20.0  # not enough data — assume neutral/ranging
+
+    high  = df['High']
+    low   = df['Low']
+    close = df['Close']
+
+    prev_close = close.shift(1)
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    up   = high.diff()
+    down = -low.diff()
+    dm_plus  = up.where((up > down) & (up > 0),     0.0)
+    dm_minus = down.where((down > up) & (down > 0), 0.0)
+
+    alpha    = 1.0 / period
+    atr      = tr.ewm(alpha=alpha, adjust=False).mean()
+    di_plus  = 100 * dm_plus.ewm(alpha=alpha, adjust=False).mean()  / atr
+    di_minus = 100 * dm_minus.ewm(alpha=alpha, adjust=False).mean() / atr
+
+    dx  = (100 * (di_plus - di_minus).abs() / (di_plus + di_minus + 1e-9))
+    adx = dx.ewm(alpha=alpha, adjust=False).mean()
+
+    return round(float(adx.iloc[-1]), 1)
+
+
+def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
+    """
+    Calculate Average True Range in price units.
+    Used to set a minimum stop-loss distance — stops smaller than
+    0.5×ATR are noise-level and will be hit randomly.
+    """
+    if len(df) < period + 1:
+        return float(df['High'].iloc[-1] - df['Low'].iloc[-1])
+
+    high       = df['High']
+    low        = df['Low']
+    prev_close = df['Close'].shift(1)
+
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low  - prev_close).abs(),
+    ], axis=1).max(axis=1)
+
+    return round(float(tr.tail(period).mean()), 5)

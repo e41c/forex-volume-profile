@@ -85,7 +85,7 @@ def build_volume_profile(df: pd.DataFrame,
     hvns    = list(profile[profile >= vol_max * Config.HVN_THRESHOLD].index)
     lvns    = list(profile[profile <= vol_max * Config.LVN_THRESHOLD].index)
 
-    log.info(
+    log.debug(
         f"Volume profile built  |  "
         f"POC: {poc:.5f}  VAH: {vah:.5f}  VAL: {val:.5f}  |  "
         f"HVNs: {len(hvns)}  LVNs: {len(lvns)}  |  "
