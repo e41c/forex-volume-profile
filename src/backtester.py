@@ -27,7 +27,7 @@ from datetime import datetime, time
 from src.indicators.volume_profile import build_volume_profile
 from src.indicators.session_profile import build_multi_session_levels
 from src.strategy.vp_strategy import generate_signal, calculate_position_size
-from src.indicators.trend_filter import calculate_adx, calculate_atr, is_trend_aligned
+from src.indicators.trend_filter import calculate_adx, calculate_atr, get_trend_state
 from src.utils.session_filter import is_tradeable_session
 from src.config import Config
 from src.utils.logger import get_logger
@@ -210,6 +210,7 @@ class BacktestTrade:
     rr_ratio:       float
     reason:         str
     trend:          str
+    mode:           str     # "TREND" or "REVERSION"
     confluences:    int
     lot_size:       float
     pnl_cad:        float
@@ -304,11 +305,10 @@ def run_backtest(
     """
     Walk-forward backtester — MT5 realistic simulation.
 
-    df_m15:             sub-H1 entry timeframe data (M15 or M30 resampled from M15).
-    entry_wick_ratio:   wick/body ratio for sub-bar rejection candles.
-                        M15 = 2.0, M30 = 1.8, H1 fallback always uses 1.5.
-    entry_min_body_pips: minimum candle body for sub-bar entries.
-                        M15 = 1.0 pip, M30 = 1.5 pips.
+    df_m15:             sub-H1 entry timeframe data (M30 resampled from M15).
+    entry_wick_ratio:   wick/body ratio for M30 rejection candles (1.8).
+                        H1 fallback always uses 1.5.
+    entry_min_body_pips: minimum candle body for M30 entries (1.5 pips).
     """
     if costs is None:
         costs = TradingCosts()
@@ -347,16 +347,15 @@ def run_backtest(
     consecutive_losses = 0
     cooldown_until     = None
 
-    # M15 trend detection — pre-compute timestamp index for O(log n) lookups
+    # M30 entry candle index — pre-compute for O(log n) lookups via searchsorted.
+    # asi8 on minute-resolution index returns microseconds; multiply by 1000
+    # to get nanoseconds so comparisons with Timestamp.value are on the same scale.
     _m15_times_ns = None
     if df_m15 is not None and len(df_m15) > 0:
         import numpy as np
-        # M15 index resolution is 'minute' → asi8 returns microseconds.
-        # Multiply by 1000 to get nanoseconds so comparisons with
-        # Timestamp.value (always nanoseconds) are on the same scale.
         _m15_times_ns = df_m15.index.asi8 * 1000
         log.info(
-            f"M15 trend detection enabled  |  "
+            f"M30 entry candles enabled  |  "
             f"{len(df_m15):,} bars  "
             f"{df_m15.index[0].date()} → {df_m15.index[-1].date()}"
         )
@@ -465,6 +464,7 @@ def run_backtest(
                     rr_ratio    = ct['rr_ratio'],
                     reason      = ct['reason'],
                     trend       = ct['trend'],
+                    mode        = ct['mode'],
                     confluences = ct['confluences'],
                     lot_size    = lot,
                     pnl_cad     = round(pnl_cad, 2),
@@ -538,41 +538,23 @@ def run_backtest(
                 _session_multi_levels = None
         multi_levels = _session_multi_levels if use_session_profiles else None
 
-        # ── M15 trend window (O(log n) lookup via searchsorted) ────
-        m15_df = None
-        if _m15_times_ns is not None:
-            import numpy as np
-            t_ns    = current_time.value
-            m15_pos = int(np.searchsorted(_m15_times_ns, t_ns, side='right'))
-            if m15_pos >= 200:   # need at least 200 bars for EMA200
-                m15_df = df_m15.iloc[
-                    max(0, m15_pos - Config.M15_TREND_BARS):m15_pos
-                ]
-
         # ── signal check ───────────────────────────────────────────
         signal_df = df.iloc[max(0, i - 300):i + 1]
         signal    = None
 
-        # ── M15 entry candle scan (4× more opportunities per H1 bar) ──
-        # Regime detection (ADX, trend) runs on H1 inside generate_signal.
-        # Only the candle pattern and SL are taken from the M15 bar.
-        # This preserves the H1 NEUTRAL edge while multiplying entries.
+        # ── Pre-compute H1 regime ONCE per bar ────────────────────
+        # ADX, trend direction, and ATR are the same for every M30 sub-bar
+        # within this H1 bar. Computing them here (once) instead of inside
+        # generate_signal (4× per bar) gives ~4x speedup on the hot path.
         #
-        # PERF: Pre-check regime once per H1 bar before scanning M15 sub-bars.
-        # ADX > 25 or not NEUTRAL → skip all 4 sub-bars immediately (~90% of bars).
-        # Each generate_signal call also passes skip_regime_checks=True so it
-        # won't recompute ADX/trend/ATR on the shared H1 signal_df.
-        # Pre-check H1 regime ONCE per bar (ADX + trend + ATR).
-        # If regime fails → skip entire M15 scan (~90% of bars eliminated here).
-        # Pre-computed values are passed to each M15 generate_signal call so
-        # ADX/trend/ATR are not recomputed 4× for the same H1 window.
-        _h1_adx      = calculate_adx(signal_df)
-        _h1_regime_ok = _h1_adx <= Config.ADX_THRESHOLD
-        _h1_neutral  = None
-        _h1_atr_pips = None
+        # Pre-check gate: skip entire M30 scan when ADX is too high.
+        _h1_adx       = calculate_adx(signal_df)
+        _h1_regime_ok = _h1_adx <= Config.ADX_THRESHOLD  # skip bars where market is trending
+        _h1_trend_direction = None
+        _h1_atr_pips      = None
         if _h1_regime_ok:
-            _h1_neutral  = is_trend_aligned(signal_df, 'BUY')  # direction-independent
-            _h1_atr_pips = calculate_atr(signal_df) / pip_size
+            _h1_trend_direction = get_trend_state(signal_df).direction
+            _h1_atr_pips        = calculate_atr(signal_df) / pip_size
 
         if _h1_regime_ok and _m15_times_ns is not None:
             h1_start_ns = current_time.value
@@ -591,15 +573,15 @@ def run_backtest(
                 m15_vol_window = df_m15.iloc[max(0, m15_i - 20):m15_i + 1]
                 try:
                     signal = generate_signal(
-                        df             = signal_df,
-                        levels         = levels,
-                        multi_levels   = multi_levels,
-                        entry_bar      = m15_bar,
-                        m15_df         = m15_vol_window,
-                        min_wick_ratio = entry_wick_ratio,
-                        _adx           = _h1_adx,
-                        _neutral       = _h1_neutral,
-                        _atr_pips      = _h1_atr_pips,
+                        df               = signal_df,
+                        levels           = levels,
+                        multi_levels     = multi_levels,
+                        entry_bar        = m15_bar,
+                        m15_df           = m15_vol_window,
+                        min_wick_ratio   = entry_wick_ratio,
+                        _adx             = _h1_adx,
+                        _trend_direction = _h1_trend_direction,
+                        _atr_pips        = _h1_atr_pips,
                     )
                 except Exception as e:
                     if verbose:
@@ -608,13 +590,18 @@ def run_backtest(
                 if signal is not None:
                     break  # take first valid M15 signal per H1 bar
 
-        # fallback: check the H1 bar itself if no M15 signal found
-        if signal is None:
+        # fallback: check the H1 bar itself if no M30 signal found.
+        # Pass pre-computed regime values — avoids redundant ADX/trend/ATR
+        # recalculation on the same H1 window.
+        if signal is None and _h1_regime_ok:
             try:
                 signal = generate_signal(
-                    df           = signal_df,
-                    levels       = levels,
-                    multi_levels = multi_levels,
+                    df               = signal_df,
+                    levels           = levels,
+                    multi_levels     = multi_levels,
+                    _adx             = _h1_adx,
+                    _trend_direction = _h1_trend_direction,
+                    _atr_pips        = _h1_atr_pips,
                 )
             except Exception as e:
                 if verbose:
@@ -660,6 +647,7 @@ def run_backtest(
             'rr_ratio':      signal.rr_ratio,
             'reason':        signal.reason,
             'trend':         signal.trend,
+            'mode':          signal.mode,
             'confluences':   signal.confluences,
             'lot_size':      lot_size,
             'nights_held':   0,
@@ -745,6 +733,8 @@ def save_trade_journal(result: BacktestResult,
             'entry_time':   t.entry_time,
             'exit_time':    t.exit_time,
             'direction':    t.direction,
+            'mode':         t.mode,
+            'trend':        t.trend,
             'entry':        t.entry,
             'stop_loss':    t.stop_loss,
             'take_profit':  t.take_profit,
@@ -757,7 +747,6 @@ def save_trade_journal(result: BacktestResult,
             'nights_held':  t.nights_held,
             'result':       t.result,
             'rr_ratio':     t.rr_ratio,
-            'trend':        t.trend,
             'confluences':  t.confluences,
             'reason':       t.reason,
         })

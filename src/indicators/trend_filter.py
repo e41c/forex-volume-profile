@@ -1,24 +1,32 @@
 # src/indicators/trend_filter.py
 """
-Priority 5 — Trend Filter: Trade With Momentum
+Trend Filter + Delta Proxy
 
-Only take longs in uptrends, only take shorts in downtrends.
-Uses EMA crossovers and price structure to determine trend.
+Determines the current H1 trend direction and whether a signal is safe to take.
 
-Three layers of trend confirmation:
-  1. EMA 50/200 crossover    — medium term trend direction
-  2. Price vs EMA 200        — is price above or below value?
-  3. Higher highs/lows       — is price structure bullish or bearish?
+Two signal modes:
+  1. Trend-following  — BUY in BULLISH, SELL in BEARISH.
+                        Price pulls back to a VP level then resumes trend direction.
+                        Most signals will be this type (more frequent).
 
-All three pointing the same way = strong trend confirmation.
+  2. Mean reversion   — Both BUY and SELL in NEUTRAL.
+                        Price bounces off a VP level back to the centre of range.
+                        Kept because NEUTRAL regime still produces clean signals.
 
-Also provides ADX-based market regime detection:
-  Volume profile is a mean-reversion strategy — it works in ranging markets.
-  ADX < 25  = ranging  = good
-  ADX > 25  = trending = skip (price blows through POC levels)
-  Data: 2008 crisis (+25 pips avg) and 2020 COVID (+16 pips avg) were top years
-        because crises create ranging volatility. 2009/2014/2024 were worst
-        because sustained trends made POC levels irrelevant.
+Counter-trend signals (BUY in BEARISH, SELL in BULLISH) are blocked — POC levels
+get blown through when price has directional conviction.
+
+Delta Proxy (order flow approximation):
+  Real order flow requires tick-level bid/ask data. We proxy it from OHLCV:
+    bar_delta = (Close - Open) / (High - Low + ε)  → range [-1, +1]
+  A rolling average over N bars estimates net buying or selling pressure.
+  This adds a direction-quality filter without needing a paid data feed.
+
+ADX (Average Directional Index):
+  Measures trend STRENGTH, not direction.
+    ADX < 25  → ranging / NEUTRAL       (mean reversion valid)
+    ADX 25-35 → moderate trend         (trend-following pullbacks valid)
+    ADX > 35  → strong trend            (skip — VP levels get blown through)
 """
 import pandas as pd
 import numpy as np
@@ -36,11 +44,11 @@ class TrendState:
     ema200:       float    # current EMA 200 value
     price_vs_ema: str      # "ABOVE" or "BELOW" EMA200
     structure:    str      # "HIGHER_HIGHS", "LOWER_LOWS", or "RANGING"
-    aligned:      bool     # True if signal direction matches trend
+    aligned:      bool     # True if signal direction is safe to take
 
 
 def calculate_emas(df: pd.DataFrame) -> tuple[pd.Series, pd.Series]:
-    """Calculate EMA 50 and EMA 200"""
+    """Calculate EMA 50 and EMA 200."""
     ema50  = df['Close'].ewm(span=50,  adjust=False).mean()
     ema200 = df['Close'].ewm(span=200, adjust=False).mean()
     return ema50, ema200
@@ -79,11 +87,17 @@ def detect_price_structure(df: pd.DataFrame,
 def get_trend_state(df: pd.DataFrame,
                     signal_direction: str = None) -> TrendState:
     """
-    Full trend analysis combining EMA, price position, and structure.
+    Full trend analysis combining EMA crossover, price vs EMA200, and price structure.
 
     Args:
-        df:               OHLCV dataframe
-        signal_direction: "BUY" or "SELL" — checks if signal aligns with trend
+        df:               OHLCV dataframe (H1)
+        signal_direction: "BUY" or "SELL" — checks if signal is safe to take:
+                          - BUY  in BULLISH → aligned (trend-following)
+                          - SELL in BEARISH → aligned (trend-following)
+                          - BUY  in NEUTRAL → aligned (mean reversion)
+                          - SELL in NEUTRAL → aligned (mean reversion)
+                          - BUY  in BEARISH → NOT aligned (counter-trend, blocked)
+                          - SELL in BULLISH → NOT aligned (counter-trend, blocked)
     """
     if len(df) < 200:
         log.warning(
@@ -139,17 +153,22 @@ def get_trend_state(df: pd.DataFrame,
         strength  = 0
 
     # ── Check signal alignment ──────────────────────────────────
-    # NEUTRAL-only mode: volume profile mean-reversion only works in ranging
-    # markets. Data: NEUTRAL = 57% win +26 pips. BULLISH/BEARISH = 24-28% losing.
+    # Trend-following: signal must match trend direction.
+    # Mean reversion: allowed in NEUTRAL (ranging) market.
+    # Counter-trend: blocked — POC levels get blown through by directional conviction.
     if signal_direction is None:
         aligned = True
     elif direction == "NEUTRAL":
-        aligned = True    # ranging market — take the signal
+        aligned = True    # ranging — both mean-reversion directions are fine
+    elif direction == "BULLISH" and signal_direction == "BUY":
+        aligned = True    # trend-following long
+    elif direction == "BEARISH" and signal_direction == "SELL":
+        aligned = True    # trend-following short
     else:
-        aligned = False   # trending market — POC levels get blown through
+        aligned = False   # counter-trend — blocked
 
     log.debug(
-        f"Trend analysis: {direction} (strength {strength}/3)  |  "
+        f"Trend: {direction} ({strength}/3)  |  "
         f"EMA50: {current_ema50:.5f}  EMA200: {current_ema200:.5f}  |  "
         f"Price: {price_vs_ema} EMA200  |  "
         f"Structure: {structure}  |  "
@@ -170,29 +189,58 @@ def get_trend_state(df: pd.DataFrame,
 def is_trend_aligned(df: pd.DataFrame,
                      signal_direction: str) -> bool:
     """
-    Simple boolean check for use in signal generation.
-    Returns True if it's safe to take the signal.
+    Boolean check for use in signal generation.
+    Returns True if the signal direction is safe to take given current trend.
     """
     state = get_trend_state(df, signal_direction)
 
     if not state.aligned:
         log.debug(
-            f"Trend filter blocked {signal_direction} signal — "
-            f"trend is {state.direction}"
+            f"Trend filter blocked {signal_direction} — trend is {state.direction}"
         )
 
     return state.aligned
+
+
+def calculate_delta_proxy(df: pd.DataFrame,
+                           lookback: int = 5) -> float:
+    """
+    OHLCV-based buying/selling pressure approximation.
+
+    True order flow = bid/ask volume split per tick (requires tick data).
+    This proxy uses bar close position within range as a directional pressure signal:
+
+        bar_delta = (Close - Open) / (High - Low + ε)
+
+    Values: +1.0 = strong buying (closed at top of range)
+            -1.0 = strong selling (closed at bottom of range)
+             0.0 = indecision / doji
+
+    Returns the rolling mean over `lookback` bars.
+
+    Use:
+      delta > +DELTA_PROXY_MIN → confirms BUY pressure
+      delta < -DELTA_PROXY_MIN → confirms SELL pressure
+    """
+    if len(df) < lookback:
+        return 0.0
+
+    recent    = df.tail(lookback)
+    bar_range = recent['High'] - recent['Low']
+    delta     = (recent['Close'] - recent['Open']) / (bar_range + 1e-9)
+
+    return round(float(delta.mean()), 3)
 
 
 def calculate_adx(df: pd.DataFrame, period: int = 14) -> float:
     """
     Calculate Average Directional Index (ADX).
 
-    ADX measures trend STRENGTH, not direction.
-      ADX < 20  — ranging / no trend        (ideal for volume profile)
-      ADX 20-25 — weak trend, borderline
-      ADX > 25  — trending market           (POC levels get blown through)
-      ADX > 40  — very strong trend         (avoid at all costs)
+    Measures trend STRENGTH, not direction.
+      ADX < 25  — ranging / NEUTRAL        (mean reversion valid)
+      ADX 25-35 — moderate trend           (trend-following pullbacks valid)
+      ADX > 35  — strong trend             (VP levels get blown through — skip)
+      ADX > 50  — very strong trend        (avoid at all costs)
 
     Returns current ADX value (0-100).
     """
@@ -230,7 +278,7 @@ def calculate_atr(df: pd.DataFrame, period: int = 14) -> float:
     """
     Calculate Average True Range in price units.
     Used to set a minimum stop-loss distance — stops smaller than
-    0.5×ATR are noise-level and will be hit randomly.
+    0.4×ATR get hit by random noise.
     """
     if len(df) < period + 1:
         return float(df['High'].iloc[-1] - df['Low'].iloc[-1])

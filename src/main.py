@@ -72,7 +72,7 @@ def run():
         )
         log.info(f"""
         =========================================
-        SIGNAL:       {signal.direction}
+        SIGNAL:       {signal.direction}  ({signal.mode})
         Reason:       {signal.reason}
         Trend:        {signal.trend}
         Confluences:  {signal.confluences}/4
