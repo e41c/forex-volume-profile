@@ -518,9 +518,23 @@ def run_backtest(
             continue
 
         # ── rolling volume profile ─────────────────────────────────
+        # Prefer M15 data for the same time window — 4× more bars gives a
+        # smoother volume histogram and more precise HVN/LVN placement.
+        # Falls back to H1 if M15 window is too short.
         window_df = df.iloc[max(0, i - profile_window):i]
         try:
-            levels = build_volume_profile(window_df)
+            if _m15_times_ns is not None:
+                win_start_ns = df.index[max(0, i - profile_window)].value
+                win_end_ns   = df.index[i].value
+                m15_s = int(np.searchsorted(_m15_times_ns, win_start_ns, side='left'))
+                m15_e = int(np.searchsorted(_m15_times_ns, win_end_ns,   side='left'))
+                m15_vp_window = df_m15.iloc[m15_s:m15_e]
+                if len(m15_vp_window) >= Config.HVN_MA_PERIOD * 2:
+                    levels = build_volume_profile(m15_vp_window)
+                else:
+                    levels = build_volume_profile(window_df)
+            else:
+                levels = build_volume_profile(window_df)
         except Exception as e:
             if verbose:
                 log.warning(f"Profile build failed at bar {i}: {e}")

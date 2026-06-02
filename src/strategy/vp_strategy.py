@@ -33,7 +33,7 @@ Future: delta proxy (calculate_delta_proxy in trend_filter.py) available for
 """
 import pandas as pd
 from dataclasses import dataclass
-from src.indicators.volume_profile import VolumeProfileLevels, price_near_level
+from src.indicators.volume_profile import VolumeProfileLevels, price_near_level, price_in_cluster
 from src.indicators.session_profile import MultiSessionLevels
 from src.indicators.trend_filter import (
     get_trend_state, calculate_adx, calculate_atr
@@ -143,12 +143,13 @@ def generate_signal(df: pd.DataFrame,
     # Check rolling profile levels first (cheapest — already computed).
     near_rolling_poc = price_near_level(price, levels.poc, pip_size)
 
-    # Non-POC HVNs from MA crossover — exclude HVNs too close to POC
-    # to avoid double-counting the dominant peak.
-    non_poc_hvns      = [h for h in levels.hvns
-                         if abs(h - levels.poc) / pip_size > Config.POC_ZONE_PIPS]
-    near_rolling_hvn  = any(price_near_level(price, h, pip_size)
-                            for h in non_poc_hvns)
+    # Non-POC HVN clusters — exclude clusters whose peak is within POC_ZONE_PIPS of POC
+    # (POC is already checked above; this avoids double-counting the dominant peak).
+    # Entry zone = full cluster mini value area [low, high], NOT just ±5 pips of peak.
+    # Wider entry zone = more signals at genuine institutional levels.
+    non_poc_clusters = [c for c in levels.hvn_clusters
+                        if abs(c.peak - levels.poc) / pip_size > Config.POC_ZONE_PIPS]
+    near_rolling_hvn = any(price_in_cluster(price, c) for c in non_poc_clusters)
 
     # Session POCs — wider zone (15 pips) because session POCs are less precise.
     # Only the DAILY session POC is a valid standalone entry trigger.

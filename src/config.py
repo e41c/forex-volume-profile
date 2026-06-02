@@ -16,16 +16,19 @@ class Config:
     BARS               = 5000
 
     # --- Volume Profile ---
-    PROFILE_BINS       = 100
-    POC_ZONE_PIPS      = 5        # proximity threshold — price must be within N pips of level
+    # 200 bins needed so MA period 55 fits: 200 >= 55*2 → MA crossover runs (not fallback).
+    # With a 300-pip rolling window: 200 bins = 1.5 pips/bin — good resolution.
+    PROFILE_BINS          = 200
+    POC_ZONE_PIPS         = 5     # proximity threshold — price must be within N pips of level
     SESSION_POC_ZONE_PIPS = 15    # wider zone for session POCs (fewer bars → less precise POC)
 
     # HVN/LVN detection — dual MA crossover (replaces fixed percentage threshold)
     # Two trailing MAs scan the volume histogram in opposite directions.
     # Where they cross → structural peak (HVN) or valley (LVN).
     # More sensitive than fixed threshold — finds all meaningful clusters.
-    HVN_MA_PERIOD      = 55       # MA period (user-validated value)
-    CLUSTER_MERGE_PIPS = 10       # merge two clusters if their peaks are within N pips
+    HVN_MA_PERIOD         = 55    # MA period (user-validated value)
+    CLUSTER_MERGE_PIPS    = 20    # merge clusters whose peaks are within N pips
+    HVN_VALUE_AREA_PCT    = 0.90  # mini value area around each HVN (90% of cluster volume)
 
     # --- Trade Management ---
     SPREAD_LIMIT_PIPS  = 2.0
