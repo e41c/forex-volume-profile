@@ -18,6 +18,7 @@ class Config:
     # --- Volume Profile ---
     PROFILE_BINS       = 100
     POC_ZONE_PIPS      = 5        # proximity threshold — price must be within N pips of level
+    SESSION_POC_ZONE_PIPS = 15    # wider zone for session POCs (fewer bars → less precise POC)
 
     # HVN/LVN detection — dual MA crossover (replaces fixed percentage threshold)
     # Two trailing MAs scan the volume histogram in opposite directions.

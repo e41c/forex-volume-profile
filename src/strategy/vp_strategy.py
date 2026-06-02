@@ -2,34 +2,34 @@
 """
 Signal generation — Volume Profile Mean Reversion
 
-This strategy trades reversals at institutional volume levels (POC, HVN)
-in ranging markets. The key insight: when EURUSD is ranging (NEUTRAL H1 trend),
-the high-volume nodes act as price magnets. Breaks below them get bought,
-breaks above them get sold. This is institutions re-entering at fair value.
+Trades reversals at institutional volume levels in ranging markets.
+The edge: when EURUSD is ranging (NEUTRAL H1 trend), high-volume nodes act
+as price magnets. Institutions re-enter at fair value when price tests these levels.
+
+Entry triggers — price must be within the relevant zone of at least one:
+  • Rolling 500-bar H1 POC       — the dominant institutional level (5 pips)
+  • Rolling profile secondary HVN — MA crossover finds meaningful clusters (5 pips)
+  • Daily session POC             — where institutions traded TODAY (15 pips)
+
+Weekly and monthly session POCs are context/confluence only — NOT entry triggers.
+Backtested: weekly-only entries = 25% win, monthly-only = 28% win → losing trades.
+Daily-only entries = 57% win. Daily POC = fresh signal; weekly/monthly = background.
+
+Confluence paths to MIN_CONFLUENCE (3):
+  A) rolling_poc + daily_poc + volume
+  B) rolling_poc + rolling_hvn + volume   (dual rolling-profile agreement)
+  C) daily_poc + session_cluster + volume (daily POC + any other session agrees)
+  D) rolling_hvn + daily_poc + volume
 
 Backtested data (23 years, 2003-2026):
-  NEUTRAL regime:   63% win rate, +15 pips avg — the edge
-  Trending markets: 34% win rate, -4.5 pips avg — counter-productive
+  NEUTRAL regime:   60-63% win rate — the edge
+  Trending markets: 34% win rate   — VP levels get blown through
 
-Trend-following VP entries were tested (2026-05-30) and rejected:
-  ADX 25-35 + BULLISH/BEARISH regime = VP levels don't hold as pullback support.
-  Price has directional conviction and blows through the levels.
-  The NEUTRAL-only filter is load-bearing — do not relax it.
+Trend-following VP entries were tested (2026-05-30) and rejected.
+NEUTRAL-only filter is load-bearing — do not relax it.
 
-Filters applied in order (cheapest first):
-  1. Price near POC or non-POC HVN                 — at an institutional level
-  2. ADX < 25                                       — ranging market only
-  3. Volume above 20-bar average                    — institutions defending level
-  4. Rejection candle (wick > body × min_wick_ratio) — price refused the level
-  5. Session POC confluence                         — multi-TF agreement
-  6. NEUTRAL trend filter                           — no directional conviction
-  7. Minimum confluence count (≥ 3)                 — enough independent evidence
-  8. ATR-based minimum SL distance                  — no noise-level stops
-  9. R:R within [MIN_RR_RATIO, MAX_RR_RATIO]        — worthwhile trade
-
-Future: delta proxy (calculate_delta_proxy in trend_filter.py) can be added as
-  a soft confluence factor once calibrated. Hard filter version was tested and
-  reduced REVERSION trades 31→11 without improving quality.
+Future: delta proxy (calculate_delta_proxy in trend_filter.py) available for
+  soft confluence use; hard-filter version reduced trades 31→11.
 """
 import pandas as pd
 from dataclasses import dataclass
@@ -51,10 +51,10 @@ class TradeSignal:
     stop_loss:    float
     take_profit:  float
     rr_ratio:     float
-    reason:       str
-    trend:        str    # trend direction at signal time ("NEUTRAL")
-    mode:         str    # "REVERSION" (always, for this strategy)
-    confluences:  int    # number of independent filters that confirmed the trade
+    reason:       str    # which level triggered, ADX, session score
+    trend:        str    # "NEUTRAL" always for this strategy
+    mode:         str    # "REVERSION" always for this strategy
+    confluences:  int    # number of independent filters confirmed
 
 
 def calculate_position_size(account_balance: float,
@@ -67,19 +67,19 @@ def calculate_position_size(account_balance: float,
     """
     risk_amount = account_balance * (risk_percent / 100)
     lots        = risk_amount / (stop_loss_pips * pip_value)
-    lots        = round(min(lots, 1.0), 2)  # cap at 1 lot max
+    lots        = round(min(lots, 1.0), 2)
     return lots
 
 
 def volume_confirms_rejection(df: pd.DataFrame,
                                lookback: int = 20) -> bool:
     """
-    Volume confirmation — last bar must have above-average volume.
+    Last bar must have above-average volume.
     High volume at a VP level = institutions are defending/testing it.
     Low volume = weak move, likely to fail.
     """
     if len(df) < lookback:
-        return True  # not enough data, don't block
+        return True
 
     avg_volume  = df['Volume'].tail(lookback).mean()
     last_volume = df['Volume'].iloc[-1]
@@ -87,39 +87,30 @@ def volume_confirms_rejection(df: pd.DataFrame,
 
     if not confirmed:
         log.debug(
-            f"Volume confirmation failed — "
-            f"last: {last_volume:.0f}  avg: {avg_volume:.0f}  "
-            f"need: {avg_volume * 1.2:.0f}"
+            f"Volume failed — last: {last_volume:.0f}  "
+            f"avg: {avg_volume:.0f}  need: {avg_volume * 1.2:.0f}"
         )
     return confirmed
 
 
-def check_session_confluence(price: float,
+def _session_pocs_near_price(price: float,
                               multi_levels: MultiSessionLevels,
-                              pip_size: float = 0.0001,
-                              pip_threshold: float = 20.0) -> int:
+                              pip_size: float) -> list[str]:
     """
-    Count how many session-timeframe POCs are within pip_threshold of price.
-    More timeframes agreeing on the same price zone = stronger institutional level.
-    Score ≥ 2 counts as one confluence factor (single TF alignment is noise).
+    Return list of session names whose POC is within SESSION_POC_ZONE_PIPS of price.
+    Uses a wider zone than the rolling profile (15 vs 5 pips) because session POCs
+    are built on fewer bars and land in a wider price zone — the old code used 20 pips.
+    Includes long_term (2000-bar POC) alongside daily/weekly/monthly.
     """
-    pocs = {
-        "long_term": multi_levels.long_term.poc,
-        "monthly":   multi_levels.monthly.poc,
-        "weekly":    multi_levels.weekly.poc,
-        "daily":     multi_levels.daily.poc,
-    }
-
     nearby = []
-    for name, poc in pocs.items():
-        dist_pips = abs(price - poc) / pip_size
-        if dist_pips <= pip_threshold:
+    for name, poc in [("long_term", multi_levels.long_term.poc),
+                       ("daily",     multi_levels.daily.poc),
+                       ("weekly",    multi_levels.weekly.poc),
+                       ("monthly",   multi_levels.monthly.poc)]:
+        distance = abs(price - poc) / pip_size
+        if distance <= Config.SESSION_POC_ZONE_PIPS:
             nearby.append(name)
-
-    if nearby:
-        log.debug(f"Session confluence — POCs nearby: {nearby}")
-
-    return len(nearby)
+    return nearby
 
 
 def generate_signal(df: pd.DataFrame,
@@ -139,50 +130,57 @@ def generate_signal(df: pd.DataFrame,
                       df (H1) is always used for regime checks (ADX, trend, ATR).
     m15_df:           M30 volume window ending at entry_bar (used for volume check).
     min_wick_ratio:   wick/body ratio threshold. H1 = 1.5, M30 = 1.8 (noisier).
-    _adx:             pre-computed ADX (avoids redundant EWM per M30 sub-bar).
-    _trend_direction: pre-computed H1 trend direction ("BULLISH"/"BEARISH"/"NEUTRAL").
-                      When provided, skips the internal get_trend_state() call.
-    _atr_pips:        pre-computed ATR in pips.
+    _adx, _trend_direction, _atr_pips: pre-computed regime values from backtester.
+                      Avoids redundant EWM recalculation per M30 sub-bar.
     """
-    # Candle-level checks use entry_bar when provided (M30 mode),
-    # otherwise fall back to last H1 bar.
     last  = entry_bar if entry_bar is not None else df.iloc[-1]
     price = float(last['Close'])
     body  = abs(float(last['Close']) - float(last['Open']))
     upper_wick = float(last['High']) - max(float(last['Close']), float(last['Open']))
     lower_wick = min(float(last['Close']), float(last['Open'])) - float(last['Low'])
 
-    # ── Filter 1: Price near VP level ─────────────────────────────
-    near_poc = price_near_level(price, levels.poc, pip_size)
+    # ── Filter 1: Price near a VP institutional level ─────────────
+    # Check rolling profile levels first (cheapest — already computed).
+    near_rolling_poc = price_near_level(price, levels.poc, pip_size)
 
-    # Non-POC HVNs only — the POC is always an HVN, exclude to avoid double-counting
-    non_poc_hvns   = [h for h in levels.hvns
-                      if abs(h - levels.poc) / pip_size > Config.POC_ZONE_PIPS]
-    near_extra_hvn = any(price_near_level(price, h, pip_size)
-                         for h in non_poc_hvns)
+    # Non-POC HVNs from MA crossover — exclude HVNs too close to POC
+    # to avoid double-counting the dominant peak.
+    non_poc_hvns      = [h for h in levels.hvns
+                         if abs(h - levels.poc) / pip_size > Config.POC_ZONE_PIPS]
+    near_rolling_hvn  = any(price_near_level(price, h, pip_size)
+                            for h in non_poc_hvns)
 
-    if not (near_poc or near_extra_hvn):
+    # Session POCs — wider zone (15 pips) because session POCs are less precise.
+    # Only the DAILY session POC is a valid standalone entry trigger.
+    # Weekly/monthly are losing entries alone (25-28% win in backtest).
+    # They remain as confluence context — near_session_near counts all sessions.
+    session_near = []
+    near_daily_poc = False
+    if multi_levels is not None:
+        session_near = _session_pocs_near_price(price, multi_levels, pip_size)
+        near_daily_poc = "daily" in session_near
+
+    session_cluster  = len(session_near) >= 2   # 2+ sessions at same price zone = bonus
+
+    # Entry gate: rolling levels OR today's daily POC.
+    # Weekly/monthly alone are blocked — not enough signal freshness.
+    if not (near_rolling_poc or near_rolling_hvn or near_daily_poc):
         return None
 
     # ── Filter 2: ADX regime — ranging market only ─────────────────
-    # ADX > 25 means trending — VP levels get blown through.
-    # Backtested: NEUTRAL (ADX < 25) = 58-63% win. Trending = 34% win.
     adx = _adx if _adx is not None else calculate_adx(df)
     if adx > Config.ADX_THRESHOLD:
-        log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD} (trending)")
+        log.debug(f"Signal rejected — ADX {adx:.1f} > {Config.ADX_THRESHOLD}")
         return None
 
     # ── Filter 3: Volume confirmation ─────────────────────────────
-    # Use M30 volume window when checking an M30 entry bar.
     vol_ctx = m15_df if (entry_bar is not None and m15_df is not None
                          and len(m15_df) >= 10) else df
     if not volume_confirms_rejection(vol_ctx):
-        log.debug("Signal rejected — volume too low at key level")
+        log.debug("Signal rejected — volume too low")
         return None
 
     # ── Filter 4: Rejection candle ────────────────────────────────
-    # Bullish: large lower wick (buyers defending level) with bullish close
-    # Bearish: large upper wick (sellers defending level) with bearish close
     is_bullish_candle = (lower_wick > body * min_wick_ratio and
                          last['Close'] > last['Open'])
     is_bearish_candle = (upper_wick > body * min_wick_ratio and
@@ -193,55 +191,52 @@ def generate_signal(df: pd.DataFrame,
 
     signal_direction = "BUY" if is_bullish_candle else "SELL"
 
-    # ── Filter 5: Session POC confluence ──────────────────────────
-    session_score = 0
-    if multi_levels is not None:
-        session_score = check_session_confluence(price, multi_levels, pip_size)
-
-    # ── Filter 6: NEUTRAL trend filter ────────────────────────────
-    # Only trade when H1 trend is NEUTRAL (ranging).
-    # BULLISH and BEARISH regimes = VP levels don't hold. Skip.
+    # ── Filter 5: NEUTRAL trend filter ────────────────────────────
     if _trend_direction is not None:
         trend_direction = _trend_direction
     else:
         trend_direction = get_trend_state(df).direction
 
     if trend_direction != "NEUTRAL":
-        log.debug(f"Signal rejected — trend is {trend_direction} (need NEUTRAL)")
+        log.debug(f"Signal rejected — trend is {trend_direction}")
         return None
 
-    # ── Filter 7: Confluence count ─────────────────────────────────
+    # ── Filter 6: Confluence count ─────────────────────────────────
     # Four independent sources of evidence — need ≥ MIN_CONFLUENCE (3).
-    # Valid paths to 3 confluences:
-    #   A) near_poc + session_score≥2 + volume  — POC with strong TF alignment
-    #   B) near_extra_hvn + session_score≥2 + volume  — secondary HVN with TF backing
-    #   C) near_poc + near_extra_hvn + volume  — dual-level agreement (no session needed)
-    #      This path fires more often now because MA crossover finds more valid HVNs.
+    # Volume is always True, so need 2 more from the other three.
     #
-    # session_score ≥ 2 kept for paths A and B — single TF alignment is noise
-    # (data: score=1 avg -2.45 pips). Path C bypasses the session requirement
-    # because overlapping POC + HVN is independently strong evidence.
+    # Valid paths to 3:
+    #   A) rolling_poc + daily_poc + volume
+    #   B) rolling_poc + rolling_hvn + volume   (dual rolling-profile agreement)
+    #   C) daily_poc + session_cluster + volume (daily + any other session agrees)
+    #   D) rolling_hvn + daily_poc + volume
+    #
+    # rolling_poc + session_cluster (no daily): also valid path if ≥2 sessions align
     confluences = sum([
-        near_poc,
-        near_extra_hvn,
-        session_score >= 2,   # ≥2 TF POCs within 20 pips — strong institutional memory
-        True,                 # volume confirmed above (always True at this point)
+        near_rolling_poc,
+        near_rolling_hvn,
+        near_daily_poc,      # today's institutional level — freshest signal
+        session_cluster,     # 2+ sessions (any combo) at same price zone
+        True,                # volume confirmed above
     ])
 
     if confluences < Config.MIN_CONFLUENCE:
-        log.debug(
-            f"Signal rejected — confluence {confluences} < {Config.MIN_CONFLUENCE}"
-        )
+        log.debug(f"Signal rejected — confluence {confluences} < {Config.MIN_CONFLUENCE}")
         return None
 
-    # ── Filter 8: Minimum SL distance (two independent floors) ───
-    # Floor 1 (ATR): stop must be large enough relative to recent volatility.
-    # Floor 2 (pips): absolute minimum — below MIN_STOP_PIPS, entry costs
-    #   (1.8 pips spread+slippage) consume an unacceptable fraction of the risk.
+    # ── Filter 7: Minimum SL distance ─────────────────────────────
+    # ATR floor: stop must be proportional to current volatility.
+    # Pip floor: below MIN_STOP_PIPS, entry costs eat too large a fraction of risk.
     atr_pips    = _atr_pips if _atr_pips is not None else calculate_atr(df) / pip_size
     min_sl_pips = max(atr_pips * Config.MIN_STOP_ATR_MULT, Config.MIN_STOP_PIPS)
 
-    reason_level = "POC" if near_poc else "HVN cluster"
+    # Build a descriptive label for the triggering level
+    if near_rolling_poc:
+        level_label = "rolling POC"
+    elif near_daily_poc:
+        level_label = f"{'/'.join(session_near)} session POC"
+    else:
+        level_label = "rolling HVN"
 
     # ── Build trade levels — BUY ───────────────────────────────────
     if is_bullish_candle:
@@ -250,10 +245,7 @@ def generate_signal(df: pd.DataFrame,
         sl_pips    = (entry - stop_loss) / pip_size
 
         if sl_pips < min_sl_pips:
-            log.debug(
-                f"Signal rejected — SL {sl_pips:.1f} pips < "
-                f"min {min_sl_pips:.1f} (40% of ATR {atr_pips:.1f})"
-            )
+            log.debug(f"Signal rejected — SL {sl_pips:.1f}p < min {min_sl_pips:.1f}p")
             return None
 
         lvns_above  = [l for l in levels.lvns if l > entry]
@@ -264,10 +256,9 @@ def generate_signal(df: pd.DataFrame,
         rr_ratio = round(tp_pips / sl_pips, 2)
 
         if rr_ratio < Config.MIN_RR_RATIO:
-            log.debug(f"Signal rejected — R:R {rr_ratio} below minimum")
+            log.debug(f"Signal rejected — R:R {rr_ratio:.2f} < {Config.MIN_RR_RATIO}")
             return None
 
-        # ── Filter 9: Cap TP at MAX_RR_RATIO ──────────────────────
         if rr_ratio > Config.MAX_RR_RATIO:
             take_profit = entry + (sl_pips * Config.MAX_RR_RATIO * pip_size)
             tp_pips     = (take_profit - entry) / pip_size
@@ -279,8 +270,8 @@ def generate_signal(df: pd.DataFrame,
             stop_loss   = round(stop_loss, 5),
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
-            reason      = (f"Bullish reversion at {reason_level} "
-                           f"(ADX {adx:.0f}, session {session_score})"),
+            reason      = (f"Bullish reversion at {level_label} "
+                           f"(ADX {adx:.0f}, session: {session_near or 'none'})"),
             trend       = trend_direction,
             mode        = "REVERSION",
             confluences = confluences,
@@ -293,10 +284,7 @@ def generate_signal(df: pd.DataFrame,
         sl_pips    = (stop_loss - entry) / pip_size
 
         if sl_pips < min_sl_pips:
-            log.debug(
-                f"Signal rejected — SL {sl_pips:.1f} pips < "
-                f"min {min_sl_pips:.1f} (40% of ATR {atr_pips:.1f})"
-            )
+            log.debug(f"Signal rejected — SL {sl_pips:.1f}p < min {min_sl_pips:.1f}p")
             return None
 
         lvns_below  = [l for l in levels.lvns if l < entry]
@@ -307,7 +295,7 @@ def generate_signal(df: pd.DataFrame,
         rr_ratio = round(tp_pips / sl_pips, 2)
 
         if rr_ratio < Config.MIN_RR_RATIO:
-            log.debug(f"Signal rejected — R:R {rr_ratio} below minimum")
+            log.debug(f"Signal rejected — R:R {rr_ratio:.2f} < {Config.MIN_RR_RATIO}")
             return None
 
         if rr_ratio > Config.MAX_RR_RATIO:
@@ -321,8 +309,8 @@ def generate_signal(df: pd.DataFrame,
             stop_loss   = round(stop_loss, 5),
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
-            reason      = (f"Bearish reversion at {reason_level} "
-                           f"(ADX {adx:.0f}, session {session_score})"),
+            reason      = (f"Bearish reversion at {level_label} "
+                           f"(ADX {adx:.0f}, session: {session_near or 'none'})"),
             trend       = trend_direction,
             mode        = "REVERSION",
             confluences = confluences,
