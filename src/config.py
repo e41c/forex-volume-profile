@@ -18,8 +18,13 @@ class Config:
     # --- Volume Profile ---
     PROFILE_BINS       = 100
     POC_ZONE_PIPS      = 5        # proximity threshold — price must be within N pips of level
-    HVN_THRESHOLD      = 0.7      # bar volume ≥ 70% of max = high volume node
-    LVN_THRESHOLD      = 0.3      # bar volume ≤ 30% of max = low volume node
+
+    # HVN/LVN detection — dual MA crossover (replaces fixed percentage threshold)
+    # Two trailing MAs scan the volume histogram in opposite directions.
+    # Where they cross → structural peak (HVN) or valley (LVN).
+    # More sensitive than fixed threshold — finds all meaningful clusters.
+    HVN_MA_PERIOD      = 55       # MA period (user-validated value)
+    CLUSTER_MERGE_PIPS = 10       # merge two clusters if their peaks are within N pips
 
     # --- Trade Management ---
     SPREAD_LIMIT_PIPS  = 2.0
@@ -34,9 +39,12 @@ class Config:
     #                  Trending markets (ADX > 25) = 34% win rate.
     ADX_THRESHOLD      = 25.0     # skip signals when ADX > 25
 
-    # --- Minimum stop distance (ATR-based) ---
-    # Stops smaller than MIN_STOP_ATR_MULT × ATR(14) get hit by noise.
-    MIN_STOP_ATR_MULT  = 0.4      # sl_pips must be ≥ 40% of ATR(14)
+    # --- Stop distance floors ---
+    # Two independent floors — both must pass.
+    # ATR floor: stop must be large enough relative to recent volatility.
+    # Pip floor: stop must never be so small that spread+slippage consumes the trade.
+    MIN_STOP_ATR_MULT  = 0.4      # sl_pips ≥ 40% of ATR(14)
+    MIN_STOP_PIPS      = 8.0      # absolute floor — below this, 1.8-pip entry cost eats 22%+ of risk
 
     # --- Circuit breaker ---
     # After N consecutive losses, pause trading for COOLDOWN_BARS H1 bars.

@@ -211,12 +211,21 @@ def generate_signal(df: pd.DataFrame,
         return None
 
     # ── Filter 7: Confluence count ─────────────────────────────────
-    # session_score >= 2 required: single TF alignment is noise (data: score=1 avg -2.45 pips)
+    # Four independent sources of evidence — need ≥ MIN_CONFLUENCE (3).
+    # Valid paths to 3 confluences:
+    #   A) near_poc + session_score≥2 + volume  — POC with strong TF alignment
+    #   B) near_extra_hvn + session_score≥2 + volume  — secondary HVN with TF backing
+    #   C) near_poc + near_extra_hvn + volume  — dual-level agreement (no session needed)
+    #      This path fires more often now because MA crossover finds more valid HVNs.
+    #
+    # session_score ≥ 2 kept for paths A and B — single TF alignment is noise
+    # (data: score=1 avg -2.45 pips). Path C bypasses the session requirement
+    # because overlapping POC + HVN is independently strong evidence.
     confluences = sum([
         near_poc,
         near_extra_hvn,
-        session_score >= 2,
-        True,   # volume confirmed above (always True at this point)
+        session_score >= 2,   # ≥2 TF POCs within 20 pips — strong institutional memory
+        True,                 # volume confirmed above (always True at this point)
     ])
 
     if confluences < Config.MIN_CONFLUENCE:
@@ -225,10 +234,12 @@ def generate_signal(df: pd.DataFrame,
         )
         return None
 
-    # ── Filter 8: ATR-based minimum SL ────────────────────────────
-    # Stops < 40% of ATR14 are inside noise and get hit randomly.
+    # ── Filter 8: Minimum SL distance (two independent floors) ───
+    # Floor 1 (ATR): stop must be large enough relative to recent volatility.
+    # Floor 2 (pips): absolute minimum — below MIN_STOP_PIPS, entry costs
+    #   (1.8 pips spread+slippage) consume an unacceptable fraction of the risk.
     atr_pips    = _atr_pips if _atr_pips is not None else calculate_atr(df) / pip_size
-    min_sl_pips = atr_pips * Config.MIN_STOP_ATR_MULT
+    min_sl_pips = max(atr_pips * Config.MIN_STOP_ATR_MULT, Config.MIN_STOP_PIPS)
 
     reason_level = "POC" if near_poc else "HVN cluster"
 
