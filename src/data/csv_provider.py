@@ -99,7 +99,7 @@ def load_csv_to_df(filepath: str, symbol: str,
 
 def already_imported(symbol: str, timeframe: str, year: int) -> bool:
     """Check if a specific year/symbol/timeframe is already in DB"""
-    con    = get_connection()
+    con    = get_connection(read_only=True)
     result = con.execute("""
         SELECT COUNT(*) FROM ohlcv
         WHERE symbol    = ?
@@ -187,7 +187,7 @@ class CSVProvider(BaseDataProvider):
                   bars:      int      = None,
                   **kwargs) -> pd.DataFrame:
 
-        con    = get_connection()
+        con    = get_connection(read_only=True)
         params = [symbol.upper(), timeframe.upper()]
         where  = "WHERE symbol = ? AND timeframe = ?"
 

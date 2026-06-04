@@ -1,8 +1,9 @@
 # src/main.py
-import platform
 import os
+import argparse
 from datetime import datetime, timezone
 from src.config import Config
+from src.data import get_provider
 from src.indicators.volume_profile import build_volume_profile
 from src.indicators.session_profile import build_multi_session_levels
 from src.strategy.vp_strategy import generate_signal, calculate_position_size
@@ -13,26 +14,10 @@ os.makedirs("data/processed", exist_ok=True)
 os.makedirs("logs",           exist_ok=True)
 
 
-def get_provider():
-    system = platform.system()
-
-    if system == "Darwin":
-        from src.data.csv_provider import CSVProvider
-        log.info("Mac — using CSV/DuckDB provider")
-        return CSVProvider()
-
-    elif system == "Windows":
-        from src.data.mt5_provider import MT5DataProvider
-        log.info("Windows — using MT5 provider")
-        return MT5DataProvider()
-
-    else:
-        raise RuntimeError(f"Unsupported OS: {system}")
-
-
-def run():
+def run(source: str = None):
     log.info("=== Goblin Bot Starting 🐲 ===")
-    provider = get_provider()
+    # source: "offline" | "mt5" | None (None → Config.DATA_SOURCE / $DATA_SOURCE)
+    provider = get_provider(source)
 
     # --- Fetch Data ---
     df = provider.get_ohlcv(
@@ -90,4 +75,10 @@ def run():
 
 
 if __name__ == "__main__":
-    run()
+    parser = argparse.ArgumentParser(description="Goblin VP bot — single signal check")
+    parser.add_argument(
+        "--source", choices=["offline", "mt5"], default=None,
+        help="Data source (default: Config.DATA_SOURCE / $DATA_SOURCE, i.e. 'offline')",
+    )
+    args = parser.parse_args()
+    run(source=args.source)

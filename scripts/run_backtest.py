@@ -23,7 +23,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import numpy as np
-from src.data.csv_provider import CSVProvider
+from src.data import get_provider
 from src.backtester import (
     run_backtest, print_results,
     save_trade_journal, TradingCosts
@@ -192,6 +192,14 @@ def plot_equity_curve(result, costs, symbol=Config.SYMBOL):
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="Goblin walk-forward backtest")
+    parser.add_argument(
+        "--source", choices=["offline", "mt5"], default="offline",
+        help="Data source (default: offline — DuckDB. Backtests should run offline.)",
+    )
+    args = parser.parse_args()
+
     log.info("=" * 55)
     log.info("GOBLIN BACKTESTER STARTING")
     log.info("=" * 55)
@@ -206,7 +214,7 @@ if __name__ == "__main__":
     )
 
     # load data
-    provider = CSVProvider()
+    provider = get_provider(args.source)
 
     log.info(f"Loading {Config.SYMBOL} {Config.TIMEFRAME_PROFILE} from DuckDB...")
     df = provider.get_ohlcv(symbol=Config.SYMBOL, timeframe=Config.TIMEFRAME_PROFILE)
@@ -239,13 +247,13 @@ if __name__ == "__main__":
         df                   = df,
         df_m15               = df_m30,      # M30 bars as entry timeframe
         costs                = costs,
-        profile_window       = 500,
-        warmup_bars          = 500,
+        profile_window       = Config.PROFILE_WINDOW,
+        warmup_bars          = Config.PROFILE_WINDOW,
         starting_balance     = Config.ACCOUNT_BALANCE,
         risk_percent         = Config.RISK_PERCENT,
         use_session_profiles = True,
-        entry_wick_ratio     = 1.8,         # M30: less noisy than M15 (2.0), noisier than H1 (1.5)
-        entry_min_body_pips  = 1.5,         # M30 candles are larger than M15
+        entry_wick_ratio     = Config.ENTRY_WICK_RATIO,     # M30: noisier than H1 → higher ratio
+        entry_min_body_pips  = Config.ENTRY_MIN_BODY_PIPS,  # M30 candles larger than M15
         verbose              = False,
     )
 

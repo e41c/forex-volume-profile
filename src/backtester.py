@@ -59,6 +59,16 @@ class TradingCosts:
     slippage_pips:  float = 0.5    # realistic MT5 execution slippage
     pip_size:       float = 0.0001 # EURUSD pip size
 
+    # Pip value in CAD per pip per standard lot (1.0 lot).
+    # Used for P&L and position sizing.  Pre-calculate at current rates:
+    #   xxxUSD pairs (EURUSD, GBPUSD, AUDUSD, NZDUSD):
+    #     pip_val_usd = 1.0 * 100000 * pip_size = $10 USD → × USDCAD
+    #   USDxxx pairs (USDJPY, USDCAD, USDCHF):
+    #     pip_val_usd = 1.0 * 100000 * pip_size / approx_price → × USDCAD
+    #   Cross pairs (EURGBP): pip_val_quote × quote/CAD rate
+    # Default = EURUSD at USDCAD 1.36 → 10 * 1.36 = $13.60 CAD/pip/lot
+    pip_value_cad_per_lot: float = 13.60  # CAD per pip per 1.0 standard lot
+
     # MT5 lot constraints
     min_lot:        float = 0.01   # micro lot minimum
     lot_step:       float = 0.01   # lot size increment
@@ -148,24 +158,6 @@ def normalize_lot_size(lots: float,
     lots  = min(lots, costs.max_lot)
     lots  = max(lots, costs.min_lot)
     return round(lots, 2)
-
-
-def pip_value_cad(lot_size: float,
-                  entry_price: float = 1.1,
-                  usdcad: float = USDCAD_RATE) -> float:
-    """
-    Real MT5 pip value calculation for EURUSD in a CAD account.
-
-    EURUSD pip value formula:
-      pip_value_USD = lot_size * 100000 * pip_size
-      pip_value_CAD = pip_value_USD * USD/CAD rate
-
-    For a 0.01 lot at EURUSD 1.1000 with USD/CAD 1.36:
-      = 0.01 * 100000 * 0.0001 = $0.10 USD
-      = $0.10 * 1.36 = $0.136 CAD per pip
-    """
-    pip_value_usd = lot_size * 100000 * 0.0001
-    return pip_value_usd * usdcad
 
 
 def is_friday_close(dt: datetime) -> bool:
@@ -291,8 +283,8 @@ def run_backtest(
     df:                   pd.DataFrame,
     df_m15:               pd.DataFrame  = None,
     costs:                TradingCosts  = None,
-    profile_window:       int           = 500,
-    warmup_bars:          int           = 500,
+    profile_window:       int           = Config.PROFILE_WINDOW,
+    warmup_bars:          int           = Config.PROFILE_WINDOW,
     pip_size:             float         = 0.0001,
     starting_balance:     float         = Config.ACCOUNT_BALANCE,
     risk_percent:         float         = Config.RISK_PERCENT,
@@ -408,7 +400,7 @@ def run_backtest(
             if hit_tp or hit_sl:
                 lot  = ct['lot_size']
                 ep   = ct['actual_entry']
-                pv   = pip_value_cad(lot, ep)
+                pv   = lot * costs.pip_value_cad_per_lot  # CAD per pip for this lot size
 
                 if ct['direction'] == 'BUY':
                     gross_pips = (exit_price - ep) / pip_size
@@ -517,10 +509,22 @@ def run_backtest(
         if not has_minimum_body(current_bar, pip_size, min_body_pips):
             continue
 
-        # ── rolling volume profile ─────────────────────────────────
-        # Prefer M15 data for the same time window — 4× more bars gives a
-        # smoother volume histogram and more precise HVN/LVN placement.
-        # Falls back to H1 if M15 window is too short.
+        # ── Pre-check: ADX gate before VP rebuild ─────────────────
+        # ADX is cheap (EWM on 300 bars). VP rebuild is expensive (~2000 bins).
+        # Skip the rebuild entirely for trending bars — they never reach generate_signal.
+        # This gives ~2× speedup vs rebuilding every bar at tick-size resolution.
+        signal_df = df.iloc[max(0, i - Config.REGIME_WINDOW):i + 1]
+        _h1_adx       = calculate_adx(signal_df)
+        _h1_regime_ok = _h1_adx <= Config.ADX_THRESHOLD
+        if not _h1_regime_ok:
+            continue
+
+        # ── Rolling volume profile — per bar, fixed 200 bins ──────
+        # Rebuilt every bar that passes the ADX gate (~50% of H1 bars).
+        # Prefer M15 data for the same window (4× more bars = smoother histogram,
+        # more precise HVN/LVN placement); fall back to H1 if the M15 slice is short.
+        # Daily cache was tried but shifts cluster positions enough to
+        # change trade entries — per-bar is the correct implementation.
         window_df = df.iloc[max(0, i - profile_window):i]
         try:
             if _m15_times_ns is not None:
@@ -530,47 +534,34 @@ def run_backtest(
                 m15_e = int(np.searchsorted(_m15_times_ns, win_end_ns,   side='left'))
                 m15_vp_window = df_m15.iloc[m15_s:m15_e]
                 if len(m15_vp_window) >= Config.HVN_MA_PERIOD * 2:
-                    levels = build_volume_profile(m15_vp_window)
+                    levels = build_volume_profile(m15_vp_window, pip_size=pip_size)
                 else:
-                    levels = build_volume_profile(window_df)
+                    levels = build_volume_profile(window_df,     pip_size=pip_size)
             else:
-                levels = build_volume_profile(window_df)
+                levels = build_volume_profile(window_df, pip_size=pip_size)
         except Exception as e:
             if verbose:
                 log.warning(f"Profile build failed at bar {i}: {e}")
             continue
 
-        # ── session profiles (cached daily — no need to rebuild every bar) ──
+        # ── Session profiles (cached daily) ───────────────────────
         if use_session_profiles and current_time.date() != _session_last_date:
             try:
-                # Use 2000-bar window so long_term POC is actually long-term,
-                # not the same 500-bar slice as the rolling profile
-                session_window        = df.iloc[max(0, i - 2000):i]
-                _session_multi_levels = build_multi_session_levels(session_window)
+                session_window        = df.iloc[max(0, i - Config.SESSION_LONGTERM_BARS):i]
+                _session_multi_levels = build_multi_session_levels(
+                    session_window, pip_size=pip_size
+                )
                 _session_last_date    = current_time.date()
             except Exception:
                 _session_multi_levels = None
         multi_levels = _session_multi_levels if use_session_profiles else None
 
-        # ── signal check ───────────────────────────────────────────
-        signal_df = df.iloc[max(0, i - 300):i + 1]
-        signal    = None
+        # ── Signal check — regime confirmed, compute trend + ATR ──
+        signal              = None
+        _h1_trend_direction = get_trend_state(signal_df).direction
+        _h1_atr_pips        = calculate_atr(signal_df) / pip_size
 
-        # ── Pre-compute H1 regime ONCE per bar ────────────────────
-        # ADX, trend direction, and ATR are the same for every M30 sub-bar
-        # within this H1 bar. Computing them here (once) instead of inside
-        # generate_signal (4× per bar) gives ~4x speedup on the hot path.
-        #
-        # Pre-check gate: skip entire M30 scan when ADX is too high.
-        _h1_adx       = calculate_adx(signal_df)
-        _h1_regime_ok = _h1_adx <= Config.ADX_THRESHOLD  # skip bars where market is trending
-        _h1_trend_direction = None
-        _h1_atr_pips      = None
-        if _h1_regime_ok:
-            _h1_trend_direction = get_trend_state(signal_df).direction
-            _h1_atr_pips        = calculate_atr(signal_df) / pip_size
-
-        if _h1_regime_ok and _m15_times_ns is not None:
+        if _m15_times_ns is not None:
             h1_start_ns = current_time.value
             h1_end_ns   = (current_time + pd.Timedelta(hours=1)).value
             sub_start   = int(np.searchsorted(_m15_times_ns, h1_start_ns,
@@ -592,6 +583,7 @@ def run_backtest(
                         multi_levels     = multi_levels,
                         entry_bar        = m15_bar,
                         m15_df           = m15_vol_window,
+                        pip_size         = pip_size,
                         min_wick_ratio   = entry_wick_ratio,
                         _adx             = _h1_adx,
                         _trend_direction = _h1_trend_direction,
@@ -607,12 +599,13 @@ def run_backtest(
         # fallback: check the H1 bar itself if no M30 signal found.
         # Pass pre-computed regime values — avoids redundant ADX/trend/ATR
         # recalculation on the same H1 window.
-        if signal is None and _h1_regime_ok:
+        if signal is None:
             try:
                 signal = generate_signal(
                     df               = signal_df,
                     levels           = levels,
                     multi_levels     = multi_levels,
+                    pip_size         = pip_size,
                     _adx             = _h1_adx,
                     _trend_direction = _h1_trend_direction,
                     _atr_pips        = _h1_atr_pips,
@@ -634,7 +627,7 @@ def run_backtest(
 
         # ── MT5 lot sizing ─────────────────────────────────────────
         sl_pips  = abs(signal.entry - signal.stop_loss) / pip_size
-        pv       = pip_value_cad(costs.min_lot, actual_entry)
+        pv       = costs.min_lot * costs.pip_value_cad_per_lot  # CAD per pip for min lot
 
         # risk amount in CAD
         risk_cad = balance * (risk_percent / 100)

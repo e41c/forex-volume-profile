@@ -292,18 +292,28 @@ def _find_hvn_lvn_ma(profile: pd.Series,
 
 
 def build_volume_profile(df: pd.DataFrame,
-                         bins: int = Config.PROFILE_BINS,
+                         bins: int = None,
+                         pip_size: float = 0.0001,
                          value_area_pct: float = 0.70) -> VolumeProfileLevels:
     """
     Build a volume profile from OHLCV data.
 
-    Distributes each bar's volume proportionally across its high-low range
-    into `bins` price buckets. POC/VAH/VAL use the standard value area algorithm.
+    Distributes each bar's volume proportionally across its high-low range into
+    `bins` price buckets. POC/VAH/VAL use the standard value area algorithm;
     HVN clusters use the dual MA crossover + 90% mini value area method.
-    Works with any OHLCV timeframe — pass M15 for finer resolution.
+
+    bins:     fixed bucket count. Defaults to Config.PROFILE_BINS (200 — the
+              proven-best resolution). Fixed bins are pair-agnostic, so the same
+              value works for every instrument. Pass an int to override.
+    pip_size: instrument pip size (0.0001 majors, 0.01 JPY). Only used to convert
+              CLUSTER_MERGE_PIPS into price units, so cluster merging is correct
+              across pairs. Works with any OHLCV timeframe — pass M15 for finer data.
     """
     price_min = float(df['Low'].min())
     price_max = float(df['High'].max())
+
+    if bins is None:
+        bins = Config.PROFILE_BINS
 
     price_levels    = np.linspace(price_min, price_max, bins)
     volume_at_price = np.zeros(bins)
@@ -355,7 +365,9 @@ def build_volume_profile(df: pd.DataFrame,
     val = float(indices[lower])
 
     # ── HVN clusters + LVN valleys via dual MA crossover ─────────
-    merge_dist = Config.CLUSTER_MERGE_PIPS * 0.0001
+    # merge distance in price units — pip_size-aware so JPY pairs merge correctly
+    # (20 pips = 0.0020 on majors, 0.20 on JPY).
+    merge_dist = Config.CLUSTER_MERGE_PIPS * pip_size
     hvn_clusters, lvns = _find_hvn_lvn_ma(
         profile,
         ma_period      = Config.HVN_MA_PERIOD,
