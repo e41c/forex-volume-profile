@@ -6,9 +6,11 @@ from src.utils.logger import get_logger
 
 log = get_logger(__name__)
 
-def get_connection() -> duckdb.DuckDBPyConnection:
+def get_connection(read_only: bool = False) -> duckdb.DuckDBPyConnection:
     os.makedirs(os.path.dirname(Config.DATA_DB), exist_ok=True)
-    return duckdb.connect(Config.DATA_DB)
+    # read_only allows many concurrent reader processes (e.g. parallel backtests /
+    # parameter sweeps) — a read-write connection takes an exclusive file lock.
+    return duckdb.connect(Config.DATA_DB, read_only=read_only)
 
 def initialize_db():
     """Create tables and indexes if they don't exist"""

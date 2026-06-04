@@ -10,6 +10,9 @@ Entry triggers — price must be within the relevant zone of at least one:
   • Rolling 500-bar H1 POC       — the dominant institutional level (5 pips)
   • Rolling profile secondary HVN — MA crossover finds meaningful clusters (5 pips)
   • Daily session POC             — where institutions traded TODAY (15 pips)
+  • Value-area edge (VAH/VAL)     — fade the 70% VA boundary back toward POC (5 pips).
+                                    Directional: VAH→SELL, VAL→BUY. Needs one more
+                                    confluence, so VA fades only fire at a real level.
 
 Weekly and monthly session POCs are context/confluence only — NOT entry triggers.
 Backtested: weekly-only entries = 25% win, monthly-only = 28% win → losing trades.
@@ -25,7 +28,9 @@ Backtested data (23 years, 2003-2026):
   NEUTRAL regime:   60-63% win rate — the edge
   Trending markets: 34% win rate   — VP levels get blown through
 
-Trend-following VP entries were tested (2026-05-30) and rejected.
+Trend-following VP entries were tested (2026-05-30, 2026-06-03) and rejected both times.
+  NEUTRAL:          54-60% WR, PF 1.25-1.85 — the edge
+  TREND_PULLBACK:   41%   WR, PF 0.82       — losing, VP levels get blown through
 NEUTRAL-only filter is load-bearing — do not relax it.
 
 Future: delta proxy (calculate_delta_proxy in trend_filter.py) available for
@@ -72,18 +77,19 @@ def calculate_position_size(account_balance: float,
 
 
 def volume_confirms_rejection(df: pd.DataFrame,
-                               lookback: int = 20) -> bool:
+                               lookback: int = None) -> bool:
     """
     Last bar must have above-average volume.
     High volume at a VP level = institutions are defending/testing it.
     Low volume = weak move, likely to fail.
     """
+    lookback = lookback if lookback is not None else Config.VOLUME_LOOKBACK
     if len(df) < lookback:
         return True
 
     avg_volume  = df['Volume'].tail(lookback).mean()
     last_volume = df['Volume'].iloc[-1]
-    confirmed   = last_volume > avg_volume * 1.2
+    confirmed   = last_volume > avg_volume * Config.VOLUME_SPIKE_MULT
 
     if not confirmed:
         log.debug(
@@ -163,9 +169,23 @@ def generate_signal(df: pd.DataFrame,
 
     session_cluster  = len(session_near) >= 2   # 2+ sessions at same price zone = bonus
 
-    # Entry gate: rolling levels OR today's daily POC.
+    # Value-area edges — fade zones back toward POC (mean reversion to fair value).
+    # Only count an edge that sits a meaningful distance from the POC, else it's just
+    # the POC zone again. Proximity here is non-directional; the fade DIRECTION is
+    # enforced in the confluence step (VAH→SELL, VAL→BUY) once the candle is known.
+    near_vah = near_val = False
+    if Config.ENABLE_VA_EDGE_FADES:
+        vah_dist = (levels.vah - levels.poc) / pip_size
+        val_dist = (levels.poc - levels.val) / pip_size
+        near_vah = (vah_dist >= Config.VA_EDGE_MIN_DIST_PIPS and
+                    abs(price - levels.vah) / pip_size <= Config.POC_ZONE_PIPS)
+        near_val = (val_dist >= Config.VA_EDGE_MIN_DIST_PIPS and
+                    abs(price - levels.val) / pip_size <= Config.POC_ZONE_PIPS)
+
+    # Entry gate: rolling levels OR today's daily POC OR a value-area edge.
     # Weekly/monthly alone are blocked — not enough signal freshness.
-    if not (near_rolling_poc or near_rolling_hvn or near_daily_poc):
+    if not (near_rolling_poc or near_rolling_hvn or near_daily_poc
+            or near_vah or near_val):
         return None
 
     # ── Filter 2: ADX regime — ranging market only ─────────────────
@@ -192,32 +212,41 @@ def generate_signal(df: pd.DataFrame,
 
     signal_direction = "BUY" if is_bullish_candle else "SELL"
 
-    # ── Filter 5: NEUTRAL trend filter ────────────────────────────
+    # ── Filter 5: NEUTRAL regime only ─────────────────────────────
+    # Mean reversion works only in ranging markets. Tested (2026-05-30, 2026-06-03):
+    # trend pullbacks (BULLISH/BEARISH) = 41% WR, PF 0.82 — VP levels get blown through.
+    # NEUTRAL-only = 54-60% WR, PF 1.25-1.85 — load-bearing, do not relax.
     if _trend_direction is not None:
         trend_direction = _trend_direction
     else:
         trend_direction = get_trend_state(df).direction
 
     if trend_direction != "NEUTRAL":
-        log.debug(f"Signal rejected — trend is {trend_direction}")
+        log.debug(f"Signal rejected — {trend_direction} regime (NEUTRAL required)")
         return None
 
     # ── Filter 6: Confluence count ─────────────────────────────────
-    # Four independent sources of evidence — need ≥ MIN_CONFLUENCE (3).
-    # Volume is always True, so need 2 more from the other three.
+    # Independent sources of evidence — need ≥ MIN_CONFLUENCE (3).
+    # Volume is always True, so need 2 more from the others.
     #
     # Valid paths to 3:
     #   A) rolling_poc + daily_poc + volume
     #   B) rolling_poc + rolling_hvn + volume   (dual rolling-profile agreement)
     #   C) daily_poc + session_cluster + volume (daily + any other session agrees)
     #   D) rolling_hvn + daily_poc + volume
+    #   E) va_edge + (any one of the above) + volume   (VA-edge fade at a real level)
     #
-    # rolling_poc + session_cluster (no daily): also valid path if ≥2 sessions align
+    # Value-area edge fade — DIRECTIONAL: VAH rejection is a SELL, VAL rejection is a
+    # BUY. Only counts when the rejection candle fades the correct edge toward POC, so
+    # a breakout candle (bullish at VAH / bearish at VAL) never earns this confluence.
+    va_edge = (near_vah and is_bearish_candle) or (near_val and is_bullish_candle)
+
     confluences = sum([
         near_rolling_poc,
         near_rolling_hvn,
         near_daily_poc,      # today's institutional level — freshest signal
         session_cluster,     # 2+ sessions (any combo) at same price zone
+        va_edge,             # value-area boundary fade in the correct direction
         True,                # volume confirmed above
     ])
 
@@ -236,19 +265,27 @@ def generate_signal(df: pd.DataFrame,
         level_label = "rolling POC"
     elif near_daily_poc:
         level_label = f"{'/'.join(session_near)} session POC"
-    else:
+    elif near_rolling_hvn:
         level_label = "rolling HVN"
+    elif va_edge and near_vah:
+        level_label = "VAH fade"
+    elif va_edge and near_val:
+        level_label = "VAL fade"
+    else:
+        level_label = "VP level"
 
     # ── Build trade levels — BUY ───────────────────────────────────
     if is_bullish_candle:
         entry      = price
-        stop_loss  = float(last['Low']) - (pip_size * 2)
+        stop_loss  = float(last['Low']) - (pip_size * Config.STOP_BUFFER_PIPS)
         sl_pips    = (entry - stop_loss) / pip_size
 
         if sl_pips < min_sl_pips:
             log.debug(f"Signal rejected — SL {sl_pips:.1f}p < min {min_sl_pips:.1f}p")
             return None
 
+        # TP: next LVN above entry — a structural gap in volume is the natural
+        # target price snaps to. Falls back to the MIN_RR formula if none above.
         lvns_above  = [l for l in levels.lvns if l > entry]
         take_profit = (min(lvns_above) if lvns_above
                        else entry + (sl_pips * Config.MIN_RR_RATIO * pip_size))
@@ -265,29 +302,32 @@ def generate_signal(df: pd.DataFrame,
             tp_pips     = (take_profit - entry) / pip_size
             rr_ratio    = round(tp_pips / sl_pips, 2)
 
+        mode_label = "REVERSION" if trend_direction == "NEUTRAL" else "TREND_PULLBACK"
         return TradeSignal(
             direction   = "BUY",
             entry       = round(entry, 5),
             stop_loss   = round(stop_loss, 5),
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
-            reason      = (f"Bullish reversion at {level_label} "
-                           f"(ADX {adx:.0f}, session: {session_near or 'none'})"),
+            reason      = (f"Bullish {mode_label.lower()} at {level_label} "
+                           f"(ADX {adx:.0f}, trend: {trend_direction}, "
+                           f"session: {session_near or 'none'})"),
             trend       = trend_direction,
-            mode        = "REVERSION",
+            mode        = mode_label,
             confluences = confluences,
         )
 
     # ── Build trade levels — SELL ──────────────────────────────────
     if is_bearish_candle:
         entry      = price
-        stop_loss  = float(last['High']) + (pip_size * 2)
+        stop_loss  = float(last['High']) + (pip_size * Config.STOP_BUFFER_PIPS)
         sl_pips    = (stop_loss - entry) / pip_size
 
         if sl_pips < min_sl_pips:
             log.debug(f"Signal rejected — SL {sl_pips:.1f}p < min {min_sl_pips:.1f}p")
             return None
 
+        # TP: next LVN below entry — symmetric to the BUY case.
         lvns_below  = [l for l in levels.lvns if l < entry]
         take_profit = (max(lvns_below) if lvns_below
                        else entry - (sl_pips * Config.MIN_RR_RATIO * pip_size))
@@ -304,16 +344,18 @@ def generate_signal(df: pd.DataFrame,
             tp_pips     = (entry - take_profit) / pip_size
             rr_ratio    = round(tp_pips / sl_pips, 2)
 
+        mode_label = "REVERSION" if trend_direction == "NEUTRAL" else "TREND_PULLBACK"
         return TradeSignal(
             direction   = "SELL",
             entry       = round(entry, 5),
             stop_loss   = round(stop_loss, 5),
             take_profit = round(take_profit, 5),
             rr_ratio    = rr_ratio,
-            reason      = (f"Bearish reversion at {level_label} "
-                           f"(ADX {adx:.0f}, session: {session_near or 'none'})"),
+            reason      = (f"Bearish {mode_label.lower()} at {level_label} "
+                           f"(ADX {adx:.0f}, trend: {trend_direction}, "
+                           f"session: {session_near or 'none'})"),
             trend       = trend_direction,
-            mode        = "REVERSION",
+            mode        = mode_label,
             confluences = confluences,
         )
 

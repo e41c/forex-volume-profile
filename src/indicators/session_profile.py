@@ -32,22 +32,24 @@ SESSION_BARS = {
 
 @dataclass
 class MultiSessionLevels:
-    long_term: VolumeProfileLevels   # full dataset profile (23yr)
-    daily:     VolumeProfileLevels   # last 24 bars
-    weekly:    VolumeProfileLevels   # last 5 days
-    monthly:   VolumeProfileLevels   # last 22 days
+    long_term: VolumeProfileLevels   # last 2000 H1 bars (~83 days / 3 months)
+    daily:     VolumeProfileLevels   # last 24 bars (~1 trading day)
+    weekly:    VolumeProfileLevels   # last 120 bars (~5 trading days)
+    monthly:   VolumeProfileLevels   # last 480 bars (~22 trading days)
 
 
 def build_session_profile(df: pd.DataFrame,
                           session: str = "daily",
-                          bins: int = 50) -> VolumeProfileLevels:
+                          bins: int = 50,
+                          pip_size: float = 0.0001) -> VolumeProfileLevels:
     """
     Build a volume profile for a specific rolling session window.
 
     Args:
-        df:      full OHLCV dataframe
-        session: one of 'daily', 'weekly', 'monthly'
-        bins:    price bucket resolution (lower than long-term is fine)
+        df:       full OHLCV dataframe
+        session:  one of 'daily', 'weekly', 'monthly'
+        bins:     price bucket resolution (lower than long-term is fine)
+        pip_size: instrument pip size, threaded through for correct cluster merging
     """
     bars = SESSION_BARS.get(session)
     if bars is None:
@@ -69,20 +71,22 @@ def build_session_profile(df: pd.DataFrame,
         f"{session_df.index[-1].strftime('%Y-%m-%d %H:%M')})"
     )
 
-    return build_volume_profile(session_df, bins=bins)
+    return build_volume_profile(session_df, bins=bins, pip_size=pip_size)
 
 
-def build_multi_session_levels(df: pd.DataFrame) -> MultiSessionLevels:
+def build_multi_session_levels(df: pd.DataFrame,
+                               pip_size: float = 0.0001) -> MultiSessionLevels:
     """
-    Build all four profiles at once.
-    Long-term uses all data. Sessions use rolling windows.
+    Build all four profiles at once using fixed-bin resolution (proven best).
+    Long-term uses the full passed window; sessions use rolling sub-windows.
+    pip_size is threaded through so cluster merging is correct across pairs.
     """
     log.debug("Building multi-session volume profiles...")
 
-    long_term = build_volume_profile(df, bins=100)
-    daily     = build_session_profile(df, "daily",   bins=50)
-    weekly    = build_session_profile(df, "weekly",  bins=75)
-    monthly   = build_session_profile(df, "monthly", bins=100)
+    long_term = build_volume_profile(df, bins=100,            pip_size=pip_size)
+    daily     = build_session_profile(df, "daily",   bins=50,  pip_size=pip_size)
+    weekly    = build_session_profile(df, "weekly",  bins=75,  pip_size=pip_size)
+    monthly   = build_session_profile(df, "monthly", bins=100, pip_size=pip_size)
 
     log.debug(
         f"Multi-session profiles built:\n"
