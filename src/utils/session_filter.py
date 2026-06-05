@@ -1,6 +1,7 @@
 # src/utils/session_filter.py
 from datetime import datetime, time
 import pytz
+from src.config import Config
 
 UTC = pytz.UTC
 NY  = pytz.timezone('America/New_York')
@@ -26,8 +27,20 @@ def get_active_session(dt: datetime) -> str | None:
     else:
         return None   # don't trade
 
+def is_asian_session(ny_time_t: time) -> bool:
+    """
+    Asian (Sydney/Tokyo) session in ET — roughly 5pm → 3am, i.e. the hours OUTSIDE
+    the London/NY window (3am-5pm). This is where AUD/NZD/JPY do their real volume.
+    """
+    return ny_time_t >= time(17, 0) or ny_time_t < time(3, 0)
+
+
 def is_tradeable_session(dt: datetime) -> bool:
-    """Returns True only during London or NY session, Mon-Fri"""
+    """
+    Returns True during tradeable sessions, Mon-Fri.
+    Default: London or NY only. If Config.INCLUDE_ASIAN_SESSION is set, also allow the
+    Asian session — relevant for AUD/NZD/JPY whose liquidity peaks in Tokyo hours.
+    """
     try:
         ny_time = dt.astimezone(NY)
     except Exception:
@@ -37,4 +50,10 @@ def is_tradeable_session(dt: datetime) -> bool:
     if ny_time.weekday() >= 5:
         return False
 
-    return get_active_session(dt) is not None
+    if get_active_session(dt) is not None:
+        return True
+
+    if getattr(Config, "INCLUDE_ASIAN_SESSION", False) and is_asian_session(ny_time.time()):
+        return True
+
+    return False

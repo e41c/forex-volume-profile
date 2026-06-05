@@ -98,10 +98,13 @@ def build_costs(preset: PairPreset) -> TradingCosts:
     )
 
 
-def run_pair(symbol: str, provider: BaseDataProvider) -> dict | None:
+def run_pair(symbol: str, provider: BaseDataProvider, h1_only: bool = False) -> dict | None:
     """
     Load data and run a full backtest for one pair.
     Returns a results summary dict, or None if data is missing.
+
+    h1_only: ignore M15 and use H1 rejection candles for entries. Useful for a fast,
+             consistent first read across pairs when M15 isn't downloaded yet.
     """
     preset = PAIR_PRESETS.get(symbol)
     if preset is None:
@@ -114,11 +117,15 @@ def run_pair(symbol: str, provider: BaseDataProvider) -> dict | None:
         log.warning(f"{symbol}: no H1 data in DB — {e}")
         return None
 
-    try:
-        df_m15 = provider.get_ohlcv(symbol=symbol, timeframe="M15")
-    except ValueError:
-        log.warning(f"{symbol}: no M15 data — falling back to H1-only entries")
-        df_m15 = None
+    df_m15 = None
+    if h1_only:
+        log.info(f"{symbol}: H1-only mode — ignoring M15, using H1 entry candles")
+    else:
+        try:
+            df_m15 = provider.get_ohlcv(symbol=symbol, timeframe="M15")
+        except ValueError:
+            log.warning(f"{symbol}: no M15 data — falling back to H1-only entries")
+            df_m15 = None
 
     df_m30 = None
     if df_m15 is not None:
@@ -244,7 +251,18 @@ if __name__ == "__main__":
         "--source", choices=["offline", "mt5"], default="offline",
         help="Data source (default: offline — DuckDB. Backtests should run offline.)",
     )
+    parser.add_argument(
+        "--h1-only", action="store_true",
+        help="Use H1 entry candles, ignore M15 (fast consistent read before M15 is loaded)",
+    )
+    parser.add_argument(
+        "--asian", action="store_true",
+        help="Also trade the Asian session (for AUD/NZD/JPY whose volume peaks in Tokyo)",
+    )
     args = parser.parse_args()
+
+    if args.asian:
+        Config.INCLUDE_ASIAN_SESSION = True
 
     # parse args — optional list of symbols, else use all with data in DB
     requested = [s.upper() for s in args.symbols] if args.symbols else None
@@ -285,9 +303,12 @@ if __name__ == "__main__":
 
     log.info(f"Running {len(pairs_to_run)} pairs: {pairs_to_run}")
 
+    if args.h1_only:
+        log.info("H1-only mode: entries on H1 candles, M15 ignored")
+
     results = []
     for symbol in pairs_to_run:
-        row = run_pair(symbol, provider)
+        row = run_pair(symbol, provider, h1_only=args.h1_only)
         if row:
             results.append(row)
 

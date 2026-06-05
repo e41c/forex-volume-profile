@@ -47,6 +47,10 @@ class Config:
     #                  Trending markets (ADX > 25) = 34% win rate.
     ADX_THRESHOLD      = 25.0     # skip signals when ADX > 25 (ranging markets only)
 
+    # Trade only London/NY by default. Asian session matters for AUD/NZD/JPY (Tokyo
+    # liquidity) — experiment flag, set per-run for those pairs.
+    INCLUDE_ASIAN_SESSION = False
+
     # --- Stop distance floors ---
     # Two independent floors — both must pass.
     # ATR floor: stop must be large enough relative to recent volatility.
