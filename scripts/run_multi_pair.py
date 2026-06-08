@@ -54,6 +54,7 @@ class PairPreset:
     swap_short:           float   # pips/night
     pip_value_cad_per_lot: float  # CAD per pip per 1.0 standard lot
     note:                 str = ""
+    asian:                bool = False  # include Asian/Tokyo session (AUD/NZD/JPY crosses)
 
 
 PAIR_PRESETS = {
@@ -61,12 +62,12 @@ PAIR_PRESETS = {
     # pip_value_usd = 10, × USDCAD 1.36
     "EURUSD": PairPreset("EURUSD", 0.0001, 1.2, -0.8,  0.2,  13.60, "benchmark"),
     "GBPUSD": PairPreset("GBPUSD", 0.0001, 1.5, -1.2,  0.4,  13.60, "similar to EUR, wider spread"),
-    "AUDUSD": PairPreset("AUDUSD", 0.0001, 1.6, -0.5, -0.2,  13.60, "commodity proxy, often ranges"),
-    "NZDUSD": PairPreset("NZDUSD", 0.0001, 2.0, -0.3, -0.3,  13.60, "thin, AUD correlation"),
+    "AUDUSD": PairPreset("AUDUSD", 0.0001, 1.6, -0.5, -0.2,  13.60, "commodity proxy, often ranges", asian=True),
+    "NZDUSD": PairPreset("NZDUSD", 0.0001, 2.0, -0.3, -0.3,  13.60, "thin, AUD correlation", asian=True),
 
     # ── USDxxx pairs ─────────────────────────────────────────────────────────
     # USDJPY: pip_val_usd = 100000 * 0.01 / 150 ≈ $6.67 → × 1.36 ≈ $9.07 CAD
-    "USDJPY": PairPreset("USDJPY", 0.01,   1.5,  0.5, -2.0,   9.07, "safe-haven, JPY pip=0.01"),
+    "USDJPY": PairPreset("USDJPY", 0.01,   1.5,  0.5, -2.0,   9.07, "safe-haven, JPY pip=0.01", asian=True),
 
     # USDCAD: quote IS CAD, pip_val = 100000 * 0.0001 / USDCAD ≈ $7.35 CAD
     "USDCAD": PairPreset("USDCAD", 0.0001, 2.0, -1.5, -0.5,   7.35, "oil-correlated"),
@@ -98,7 +99,8 @@ def build_costs(preset: PairPreset) -> TradingCosts:
     )
 
 
-def run_pair(symbol: str, provider: BaseDataProvider, h1_only: bool = False) -> dict | None:
+def run_pair(symbol: str, provider: BaseDataProvider, h1_only: bool = False,
+             force_asian: bool = False) -> dict | None:
     """
     Load data and run a full backtest for one pair.
     Returns a results summary dict, or None if data is missing.
@@ -140,8 +142,13 @@ def run_pair(symbol: str, provider: BaseDataProvider, h1_only: bool = False) -> 
     costs  = build_costs(preset)
     t0     = time.time()
 
+    # Per-pair session: AUD/NZD/JPY trade their Tokyo liquidity; EUR/GBP/USD majors
+    # stay London/NY. (A global --asian flag can still force it on for ad-hoc tests.)
+    Config.INCLUDE_ASIAN_SESSION = preset.asian or force_asian
+
     log.info(f"{'─'*55}")
-    log.info(f"Running {symbol}  ({preset.note})")
+    log.info(f"Running {symbol}  ({preset.note})  "
+             f"[{'Asian+' if Config.INCLUDE_ASIAN_SESSION else ''}London/NY]")
     log.info(f"{'─'*55}")
 
     result = run_backtest(
@@ -308,7 +315,7 @@ if __name__ == "__main__":
 
     results = []
     for symbol in pairs_to_run:
-        row = run_pair(symbol, provider, h1_only=args.h1_only)
+        row = run_pair(symbol, provider, h1_only=args.h1_only, force_asian=args.asian)
         if row:
             results.append(row)
 
