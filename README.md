@@ -6,6 +6,12 @@ A Python algorithmic trading system that identifies institutional price levels u
 volume profile analysis, then enters on rejection candles in ranging markets. Designed
 for live execution via MetaTrader 5, developed and backtested on macOS with DuckDB.
 
+> **Beyond EURUSD — The Fleet.** This single-pair model has since grown into a
+> **complete, validated, risk-managed multi-edge portfolio** spanning forex, equity
+> indices, metals, and energy (10 validated edges across momentum *and* mean-reversion,
+> combined to a fundable ~9.5% drawdown). See **[docs/THE_FLEET.md](docs/THE_FLEET.md)**
+> for the full breakdown — including every experiment the out-of-sample gauntlet *rejected*.
+
 ---
 
 ## Results — 23-Year Walk-Forward Backtest (2003–2026)
