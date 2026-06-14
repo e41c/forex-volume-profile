@@ -95,6 +95,28 @@ The system is complete and fundable. Growing the income is now a matter of *more
 
 ---
 
+## Why a fleet, not just the best single edge?
+
+A fair question: the single EURUSD edge has a *higher* profit factor (2.30) than the
+combined portfolio (1.33). Why dilute it? Because per-trade quality isn't what makes a
+system *usable*. Both, risk-managed to the same ~10% drawdown:
+
+| Metric | EURUSD only | The Fleet (11) |
+|--------|-------------|----------------|
+| Annual return (CAGR) | 2.4% | 3.1% |
+| Max drawdown | −10.0% | −8.8% |
+| **Sharpe (risk-adjusted)** | **0.49** | **1.00** |
+| **Trades / year** | **1.8** | **124** |
+| Years with any trade | 16 / 21 | 20 / 22 |
+| Profit factor | 2.30 | 1.33 |
+
+![EURUSD vs Fleet](eurusd_vs_fleet.png)
+
+Same end-point, completely different *path*: EURUSD is flat for years then jumps (lumpy,
+**5 dead years** with no trades — unfundable); the Fleet is a smooth, frequent grind. The
+fleet's value is **consistency, frequency, diversification, and fundability** — the things
+that let real capital be deployed on it — not a higher headline return.
+
 ## Tooling
 
 | Script | Purpose |

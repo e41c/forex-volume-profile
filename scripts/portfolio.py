@@ -187,43 +187,58 @@ def fundable(trades, target_dd, risk0=0.01):
     return metrics_from_curve(c, vp, years), c
 
 
+def active_years(trades):
+    yrs = sorted(set(pd.Timestamp(t[0]).year for t in trades))
+    span = yrs[-1] - yrs[0] + 1
+    return len(yrs), span
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
     ap.add_argument("--target-dd", type=float, default=0.10)
-    ap.add_argument("--capital", type=float, default=5000.0)   # account size for $ P&L
+    ap.add_argument("--capital", type=float, default=5000.0)
     a = ap.parse_args(argv)
 
     log.info("Building sleeves...")
-    base = momentum_trades() + eurusd_trades() + idx_reversion_trades()
-    xsec = fx_xsec_trades()
+    eur = eurusd_trades()
+    fleet = momentum_trades() + eur + idx_reversion_trades() + fx_xsec_trades()
 
-    print("\n" + "="*74)
-    print(f"  THE FLEET — does the market-neutral FX sleeve help? (fundable @ {int(a.target_dd*100)}% DD)")
-    print("="*74)
-    print(f"  {'config':<34}{'/yr':>5}{'PF':>6}{'CAGR':>8}{'maxDD':>8}{'Sharpe':>8}")
-    print("  " + "-"*70)
-    m_base, _ = fundable(base, a.target_dd)
-    print(f"  {'WITHOUT xsec (10 edges)':<34}{m_base['per_yr']:>5.0f}{m_base['pf']:>6.2f}"
-          f"{m_base['cagr']*100:>7.1f}%{m_base['maxdd']*100:>7.1f}%{m_base['sharpe']:>8.2f}")
-    m_all, c = fundable(base + xsec, a.target_dd)
-    print(f"  {'WITH market-neutral FX xsec':<34}{m_all['per_yr']:>5.0f}{m_all['pf']:>6.2f}"
-          f"{m_all['cagr']*100:>7.1f}%{m_all['maxdd']*100:>7.1f}%{m_all['sharpe']:>8.2f}")
-    print("="*74)
-    print(f"  Sharpe {m_base['sharpe']:.2f} → {m_all['sharpe']:.2f}   "
-          f"CAGR {m_base['cagr']*100:.1f}% → {m_all['cagr']*100:.1f}%  (both at ~{int(a.target_dd*100)}% DD)")
-    print(f"  → on $200k funded @80% split ≈ ${m_all['cagr']*200000*0.8:,.0f}/yr per account")
-    print("="*74)
+    m_eur, c_eur = fundable(eur, a.target_dd)
+    m_all, c_all = fundable(fleet, a.target_dd)
+    ay_eur, span_eur = active_years(eur)
+    ay_all, span_all = active_years(fleet)
 
+    print("\n" + "="*78)
+    print(f"  EURUSD-ONLY  vs  THE FLEET   (both risk-managed to ~{int(a.target_dd*100)}% max drawdown)")
+    print("="*78)
+    print(f"  {'metric':<26}{'EURUSD only':>16}{'The Fleet (11)':>18}")
+    print("  " + "-"*72)
+    print(f"  {'trades / year':<26}{m_eur['per_yr']:>16.1f}{m_all['per_yr']:>18.0f}")
+    print(f"  {'years with ANY trade':<26}{f'{ay_eur}/{span_eur}':>16}{f'{ay_all}/{span_all}':>18}")
+    print(f"  {'annual return (CAGR)':<26}{m_eur['cagr']*100:>15.1f}%{m_all['cagr']*100:>17.1f}%")
+    print(f"  {'max drawdown':<26}{m_eur['maxdd']*100:>15.1f}%{m_all['maxdd']*100:>17.1f}%")
+    print(f"  {'Sharpe (risk-adjusted)':<26}{m_eur['sharpe']:>16.2f}{m_all['sharpe']:>18.2f}")
+    print(f"  {'profit factor':<26}{m_eur['pf']:>16.2f}{m_all['pf']:>18.2f}")
+    print("="*78)
+    print(f"  Similar CAGR — but the Fleet trades {m_all['per_yr']/max(m_eur['per_yr'],0.1):.0f}x more often, "
+          f"with a higher Sharpe ({m_eur['sharpe']:.2f}→{m_all['sharpe']:.2f}).")
+    print(f"  EURUSD alone is flat in {span_eur-ay_eur} of {span_eur} years → NOT fundable (a prop")
+    print(f"  eval needs activity in ~1 month). The Fleet is consistent & fundable → that's the point.")
+    print("="*78)
+
+    # dual equity curve (rebased to 1.0)
     fig, ax = plt.subplots(figsize=(14, 7), facecolor="#0f0f1a")
     ax.set_facecolor("#16162a")
-    ax.plot(c.index, c.values, color="#22c55e", lw=1.3)
+    ax.plot(c_eur.index, c_eur.values, color="#888", lw=1.1, label=f"EURUSD only (Sharpe {m_eur['sharpe']:.2f}, {m_eur['per_yr']:.1f} tr/yr)")
+    ax.plot(c_all.index, c_all.values, color="#22c55e", lw=1.4, label=f"The Fleet (Sharpe {m_all['sharpe']:.2f}, {m_all['per_yr']:.0f} tr/yr)")
     ax.set_yscale("log")
-    ax.set_title(f"THE FLEET — 11 edges, risk-managed  CAGR {m_all['cagr']*100:.1f}%  "
-                 f"maxDD {m_all['maxdd']*100:.1f}%  Sharpe {m_all['sharpe']:.2f}", color="#e8e8e0")
+    ax.set_title("EURUSD-only (lumpy, rare) vs The Fleet (smooth, frequent) — same ~10% drawdown",
+                 color="#e8e8e0")
+    ax.legend(facecolor="#1a1a2e", labelcolor="#e8e8e0", framealpha=0.6)
     ax.tick_params(colors="#888780"); ax.grid(alpha=0.15)
-    out = "data/processed/portfolio_equity.png"
+    out = "data/processed/eurusd_vs_fleet.png"
     plt.savefig(out, dpi=140, bbox_inches="tight", facecolor="#0f0f1a")
-    print(f"  equity chart → {out}")
+    print(f"  comparison chart → {out}")
 
     # ── recent-window P&L on a real account ($) ──────────────────────
     cap = a.capital
