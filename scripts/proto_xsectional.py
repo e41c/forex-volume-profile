@@ -31,6 +31,12 @@ BASKETS = {
     "indices":     ["usa500idxusd", "usatechidxusd", "usa30idxusd", "deuidxeur", "jpnidxjpy"],
     "commodities": ["XAUUSD", "XAGUSD", "BRENTCMDUSD", "LIGHTCMDUSD", "COPPERCMDUSD", "GASCMDUSD"],
     "metals_energy": ["XAUUSD", "XAGUSD", "BRENTCMDUSD", "LIGHTCMDUSD", "COPPERCMDUSD"],
+    # wide FX universe (28 G8 pairs) — breadth for cross-sectional currency momentum
+    "fx": ["EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD", "AUDUSD", "NZDUSD",
+           "EURGBP", "EURJPY", "EURCHF", "EURAUD", "EURCAD", "EURNZD",
+           "GBPJPY", "GBPCHF", "GBPAUD", "GBPCAD", "GBPNZD",
+           "AUDJPY", "AUDCHF", "AUDCAD", "AUDNZD",
+           "CADJPY", "CADCHF", "CHFJPY", "NZDJPY", "NZDCAD", "NZDCHF"],
 }
 
 
@@ -68,13 +74,13 @@ def run(closes, signal, lookback, hold, n, cost_pct):
             longs, shorts = order[:n], order[-n:]      # long losers, short winners
         fwd = C[i + hold] / C[i] - 1.0
         pnl = fwd[longs].mean() - fwd[shorts].mean()
-        trades.append((dates[i], pnl * 100 - cost_pct))
+        trades.append((dates[i], dates[i + hold], pnl * 100 - cost_pct))   # (entry, exit, ret%)
         i += hold
     return trades
 
 
 def stats(trades, years):
-    r = np.array([t[1] for t in trades])
+    r = np.array([t[2] for t in trades])
     if len(r) == 0:
         return None
     w = r[r > 0]; l = r[r < 0]

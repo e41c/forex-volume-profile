@@ -29,6 +29,7 @@ import matplotlib.pyplot as plt
 from src.data.csv_provider import CSVProvider
 from scripts.proto_momentum import run as mom_run
 from scripts.proto_reversion_idx import run as rev_run, to_daily
+from scripts.proto_xsectional import run as xsec_run, load_basket, BASKETS
 from src.backtester import run_backtest, TradingCosts
 from src.config import Config
 from src.utils.logger import get_logger
@@ -71,6 +72,14 @@ def idx_reversion_trades():
     return out
 
 
+def fx_xsec_trades():
+    """Market-neutral cross-sectional FX reversion (28-pair basket) → raw = period return%."""
+    closes = load_basket(BASKETS["fx"])
+    recs = xsec_run(closes, "xrev", 20, 20, 4, 0.10)   # validated config
+    log.info(f"  xsec FX (market-neutral): {len(recs)} rebalances")
+    return [(et, xt, ret, "xsec:fx") for et, xt, ret in recs]
+
+
 def eurusd_trades():
     """EURUSD VP reversion via the production backtester → raw = net pips."""
     prov = CSVProvider()
@@ -111,6 +120,7 @@ def simulate(trades, risk_frac):
 
 def sleeve_of(src):
     if src.startswith("mom"):     return "momentum"
+    if src.startswith("xsec"):    return "xsec"
     if src == "rev:EURUSD":       return "eurusd"
     return "idxrev"
 
@@ -163,63 +173,73 @@ def metrics_from_curve(curve, trades, years):
                 n=len(Rs), per_yr=len(Rs)/years, win=100*len(w)/len(Rs))
 
 
+def fundable(trades, target_dd, risk0=0.01):
+    """Risk-managed config: sleeve budgeting + de-risk-in-DD + vol-target to target_dd."""
+    vp = vol_parity(trades); w = source_weights(trades)
+    years = (pd.to_datetime([t[0] for t in trades]).max() -
+             pd.to_datetime([t[0] for t in trades]).min()).days / 365.25
+    risk = risk0; c = None
+    for _ in range(5):
+        c = simulate_rm(vp, risk, w, 0.08, 0.5)
+        m = metrics_from_curve(c, vp, years)
+        if abs(m['maxdd']) > 0.001:
+            risk *= target_dd / abs(m['maxdd'])
+    return metrics_from_curve(c, vp, years), c
+
+
 def main(argv):
     ap = argparse.ArgumentParser()
-    ap.add_argument("--risk", type=float, default=0.01)
-    ap.add_argument("--target-dd", type=float, default=0.10)  # vol-target the max drawdown
+    ap.add_argument("--target-dd", type=float, default=0.10)
+    ap.add_argument("--capital", type=float, default=5000.0)   # account size for $ P&L
     a = ap.parse_args(argv)
 
     log.info("Building sleeves...")
-    allt = momentum_trades() + eurusd_trades() + idx_reversion_trades()
-    years = (pd.to_datetime([t[0] for t in allt]).max() -
-             pd.to_datetime([t[0] for t in allt]).min()).days / 365.25
-    vp = vol_parity(allt)
-    eq_w = {t[3]: 1.0 for t in allt}            # flat (equal) weights
-    sl_w = source_weights(allt)                 # sleeve-budgeted weights
+    base = momentum_trades() + eurusd_trades() + idx_reversion_trades()
+    xsec = fx_xsec_trades()
 
     print("\n" + "="*74)
-    print(f"  THE FLEET — risk-managed portfolio  ({years:.0f}yr)")
+    print(f"  THE FLEET — does the market-neutral FX sleeve help? (fundable @ {int(a.target_dd*100)}% DD)")
     print("="*74)
-    print(f"  {'config':<30}{'/yr':>5}{'PF':>6}{'CAGR':>8}{'maxDD':>8}{'Sharpe':>8}")
+    print(f"  {'config':<34}{'/yr':>5}{'PF':>6}{'CAGR':>8}{'maxDD':>8}{'Sharpe':>8}")
     print("  " + "-"*70)
-
-    # 1) flat vol-parity (the Sharpe-1.05 baseline), no risk mgmt
-    flat = metrics_from_curve(simulate_rm(vp, a.risk, eq_w, 1.0, 1.0), vp, years)
-    print(f"  {'flat (vol-parity)':<30}{flat['per_yr']:>5.0f}{flat['pf']:>6.2f}"
-          f"{flat['cagr']*100:>7.1f}%{flat['maxdd']*100:>7.1f}%{flat['sharpe']:>8.2f}")
-
-    # 2) + sleeve budgeting
-    sb = metrics_from_curve(simulate_rm(vp, a.risk, sl_w, 1.0, 1.0), vp, years)
-    print(f"  {'+ sleeve budgeting':<30}{sb['per_yr']:>5.0f}{sb['pf']:>6.2f}"
-          f"{sb['cagr']*100:>7.1f}%{sb['maxdd']*100:>7.1f}%{sb['sharpe']:>8.2f}")
-
-    # 3) + de-risk-in-drawdown, vol-targeted to target-dd
-    risk = a.risk
-    for _ in range(4):                          # converge risk to hit target DD
-        c = simulate_rm(vp, risk, sl_w, 0.08, 0.5)
-        m = metrics_from_curve(c, vp, years)
-        if abs(m['maxdd']) > 0.001:
-            risk *= a.target_dd / abs(m['maxdd'])
-    rm = metrics_from_curve(c, vp, years)
-    print(f"  {'+ de-risk + vol-target('+str(int(a.target_dd*100))+'%)':<30}"
-          f"{rm['per_yr']:>5.0f}{rm['pf']:>6.2f}{rm['cagr']*100:>7.1f}%"
-          f"{rm['maxdd']*100:>7.1f}%{rm['sharpe']:>8.2f}")
+    m_base, _ = fundable(base, a.target_dd)
+    print(f"  {'WITHOUT xsec (10 edges)':<34}{m_base['per_yr']:>5.0f}{m_base['pf']:>6.2f}"
+          f"{m_base['cagr']*100:>7.1f}%{m_base['maxdd']*100:>7.1f}%{m_base['sharpe']:>8.2f}")
+    m_all, c = fundable(base + xsec, a.target_dd)
+    print(f"  {'WITH market-neutral FX xsec':<34}{m_all['per_yr']:>5.0f}{m_all['pf']:>6.2f}"
+          f"{m_all['cagr']*100:>7.1f}%{m_all['maxdd']*100:>7.1f}%{m_all['sharpe']:>8.2f}")
     print("="*74)
-    print(f"  FUNDABLE CONFIG: CAGR {rm['cagr']*100:.1f}% at {abs(rm['maxdd'])*100:.1f}% maxDD, "
-          f"Sharpe {rm['sharpe']:.2f}, {rm['per_yr']:.0f} trades/yr")
-    print(f"  → on $200k funded @80% split ≈ ${rm['cagr']*200000*0.8:,.0f}/yr per account")
+    print(f"  Sharpe {m_base['sharpe']:.2f} → {m_all['sharpe']:.2f}   "
+          f"CAGR {m_base['cagr']*100:.1f}% → {m_all['cagr']*100:.1f}%  (both at ~{int(a.target_dd*100)}% DD)")
+    print(f"  → on $200k funded @80% split ≈ ${m_all['cagr']*200000*0.8:,.0f}/yr per account")
     print("="*74)
 
     fig, ax = plt.subplots(figsize=(14, 7), facecolor="#0f0f1a")
     ax.set_facecolor("#16162a")
     ax.plot(c.index, c.values, color="#22c55e", lw=1.3)
     ax.set_yscale("log")
-    ax.set_title(f"THE FLEET — risk-managed  CAGR {rm['cagr']*100:.1f}%  "
-                 f"maxDD {rm['maxdd']*100:.1f}%  Sharpe {rm['sharpe']:.2f}", color="#e8e8e0")
+    ax.set_title(f"THE FLEET — 11 edges, risk-managed  CAGR {m_all['cagr']*100:.1f}%  "
+                 f"maxDD {m_all['maxdd']*100:.1f}%  Sharpe {m_all['sharpe']:.2f}", color="#e8e8e0")
     ax.tick_params(colors="#888780"); ax.grid(alpha=0.15)
     out = "data/processed/portfolio_equity.png"
     plt.savefig(out, dpi=140, bbox_inches="tight", facecolor="#0f0f1a")
     print(f"  equity chart → {out}")
+
+    # ── recent-window P&L on a real account ($) ──────────────────────
+    cap = a.capital
+    end = c.index[-1]
+    print("\n" + "="*74)
+    print(f"  RECENT REALISED P&L on ${cap:,.0f} (fundable ~{int(a.target_dd*100)}% DD config)")
+    print("="*74)
+    for label, days in [("3 months", 91), ("6 months", 182), ("12 months", 365)]:
+        seg = c[c.index >= end - pd.Timedelta(days=days)]
+        if len(seg) > 1:
+            ret = seg.iloc[-1]/seg.iloc[0] - 1
+            print(f"  last {label:<10} {ret*100:>+7.2f}%   →   ${cap*ret:>+9,.0f}")
+    print("="*74)
+    print(f"  ⚠ 3-6 months is a TINY sample (noise, not the edge). At this safe DD the system")
+    print(f"    is calibrated to ~{m_all['cagr']*100:.0f}% / yr; its value is over YEARS and SCALED capital.")
+    print("="*74)
 
 
 if __name__ == "__main__":
